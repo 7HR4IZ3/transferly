@@ -637,6 +637,21 @@ a {
   color: var(--danger);
 }
 
+@media (prefers-color-scheme: dark) {
+  .action-card.receive .action-card-bottom > span:first-child {
+    color: var(--muted);
+  }
+
+  .action-card.receive .action-icon,
+  .action-card.receive .arrow-link {
+    border-color: var(--line-strong);
+  }
+
+  .action-card.receive .arrow-link {
+    background: var(--canvas);
+  }
+}
+
 .wide-button {
   width: 100%;
 }
