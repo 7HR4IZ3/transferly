@@ -1,0 +1,29 @@
+{
+  "name": "transferly",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint .",
+    "copy:qr-worker": "node scripts/copy-qr-worker.mjs",
+    "postinstall": "node scripts/copy-qr-worker.mjs"
+  },
+  "dependencies": {
+    "next": "16.3.5",
+    "qr-scanner": "1.4.2",
+    "qrcode": "1.5.4",
+    "react": "19.3.0",
+    "react-dom": "19.3.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/qrcode": "^1.5.5",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "eslint": "^9.0.0",
+    "eslint-config-next": "16.3.5",
+    "typescript": "^5.9.0"
+  }
+}
