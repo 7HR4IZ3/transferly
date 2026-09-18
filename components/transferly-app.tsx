@@ -20,7 +20,7 @@ import {
   Wifi,
   XIcon,
 } from "./icons";
-import { collectSignalFrame, createSignalFrames } from "../lib/signal";
+import { collectSignalFrame, createSignalFrames, type SignalFrameBucket } from "../lib/signal";
 import { createPeerConnection, descriptionToSignal, signalToDescription, waitForIceGatheringComplete } from "../lib/webrtc";
 
 type Workspace = "send" | "receive";
@@ -78,6 +78,12 @@ type ControlMessage =
     }
   | {
       type: "transfer-end";
+    }
+  | {
+      type: "ready";
+    }
+  | {
+      type: "transfer-ack";
     }
   | {
       type: "cancel";
@@ -154,18 +160,60 @@ function waitForChannelBuffer(channel: RTCDataChannel) {
 
   channel.bufferedAmountLowThreshold = CHANNEL_LOW_WATER_MARK;
 
-  return new Promise<void>((resolve) => {
+  return new Promise<void>((resolve, reject) => {
     let interval = 0;
-    const release = () => {
+    const timeout = window.setTimeout(() => finish(new Error("The connection stopped accepting file data.")), 30_000);
+    const finish = (error?: Error) => {
       channel.removeEventListener("bufferedamountlow", release);
+      channel.removeEventListener("close", handleClose);
+      channel.removeEventListener("error", handleError);
       window.clearInterval(interval);
-      resolve();
+      window.clearTimeout(timeout);
+      if (error) reject(error);
+      else resolve();
     };
+    const release = () => finish();
+    const handleClose = () => finish(new Error("The peer disconnected while the file was sending."));
+    const handleError = () => finish(new Error("The browser reported a problem sending file data."));
 
     channel.addEventListener("bufferedamountlow", release);
+    channel.addEventListener("close", handleClose);
+    channel.addEventListener("error", handleError);
     interval = window.setInterval(() => {
-      if (channel.bufferedAmount <= CHANNEL_LOW_WATER_MARK) release();
+      if (channel.readyState !== "open") handleClose();
+      else if (channel.bufferedAmount <= CHANNEL_LOW_WATER_MARK) release();
     }, 80);
+  });
+}
+
+function waitForControlMessage(channel: RTCDataChannel, expectedType: "ready" | "transfer-ack") {
+  return new Promise<void>((resolve, reject) => {
+    const timeout = window.setTimeout(() => finish(new Error("The receiver did not respond in time.")), 60_000);
+    const finish = (error?: Error) => {
+      channel.removeEventListener("message", handleMessage);
+      channel.removeEventListener("close", handleClose);
+      channel.removeEventListener("error", handleError);
+      window.clearTimeout(timeout);
+      if (error) reject(error);
+      else resolve();
+    };
+    const handleMessage = (event: MessageEvent) => {
+      if (typeof event.data !== "string") return;
+
+      try {
+        const message = JSON.parse(event.data) as ControlMessage;
+        if (message.type === expectedType) finish();
+        else if (message.type === "cancel") finish(new Error(message.reason || "The receiver cancelled this transfer."));
+      } catch {
+        // Ignore unrelated control data and keep waiting for the expected response.
+      }
+    };
+    const handleClose = () => finish(new Error("The peer disconnected before confirming the transfer."));
+    const handleError = () => finish(new Error("The browser reported a problem with the direct connection."));
+
+    channel.addEventListener("message", handleMessage);
+    channel.addEventListener("close", handleClose);
+    channel.addEventListener("error", handleError);
   });
 }
 
@@ -278,17 +326,21 @@ function QrDisplay({
   frames: string[];
   onCopy: () => void;
 }) {
-  const [frameIndex, setFrameIndex] = useState(0);
+  const [frameState, setFrameState] = useState({ source: frames, index: 0 });
   const [imageUrl, setImageUrl] = useState("");
-  const safeFrameIndex = frames.length ? frameIndex % frames.length : 0;
+  const [imageFrame, setImageFrame] = useState("");
+  const safeFrameIndex = frameState.source === frames && frames.length ? frameState.index % frames.length : 0;
 
   useEffect(() => {
     if (frames.length <= 1) return;
     const interval = window.setInterval(() => {
-      setFrameIndex((current) => (current + 1) % frames.length);
-    }, 900);
+      setFrameState((current) => {
+        const currentIndex = current.source === frames ? current.index : 0;
+        return { source: frames, index: (currentIndex + 1) % frames.length };
+      });
+    }, 1_400);
     return () => window.clearInterval(interval);
-  }, [frames.length]);
+  }, [frames]);
 
   useEffect(() => {
     let active = true;
@@ -301,16 +353,19 @@ function QrDisplay({
     }
 
     QRCode.toDataURL(currentFrame, {
-      width: 260,
+      width: 300,
       margin: 1,
-      errorCorrectionLevel: "M",
+      errorCorrectionLevel: "L",
       color: { dark: "#171715", light: "#ffffff" },
     })
       .then((url) => {
-        if (active) setImageUrl(url);
+        if (active) {
+          setImageUrl(url);
+          setImageFrame(currentFrame);
+        }
       })
       .catch(() => {
-        if (active) setImageUrl("");
+        if (active) setImageFrame("");
       });
 
     return () => {
@@ -320,7 +375,11 @@ function QrDisplay({
 
   return (
     <figure className="qr-card">
-      {imageUrl ? <img alt="Pairing code" src={imageUrl} /> : <span className="empty-state">Preparing pairing code…</span>}
+      {imageUrl && imageFrame === (frames[safeFrameIndex] ?? "") ? (
+        <img alt="Pairing code" src={imageUrl} />
+      ) : (
+        <span className="empty-state">Preparing pairing code…</span>
+      )}
       <figcaption>
         {frames.length > 1
           ? "Hold this screen steady. The code changes automatically."
@@ -342,7 +401,7 @@ function QrScannerPanel({
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const scannerRef = useRef<{ stop: () => void; destroy: () => void } | null>(null);
-  const frameMapRef = useRef(new Map<string, Map<number, string>>());
+  const frameMapRef = useRef(new Map<string, SignalFrameBucket>());
   const onCompleteRef = useRef(onComplete);
   const [status, setStatus] = useState("Requesting camera access…");
   const [error, setError] = useState("");
@@ -375,10 +434,12 @@ function QrScannerPanel({
               onCompleteRef.current(collected.signal);
             } else if (active && collected.total > 1) {
               setStatus("Reading the pairing code…");
+              if (collected.error) setError(collected.error);
             }
           },
           {
             preferredCamera: "environment",
+            maxScansPerSecond: 5,
             highlightScanRegion: false,
             returnDetailedScanResult: true,
           },
@@ -445,6 +506,7 @@ export default function TransferlyApp() {
   const peerRef = useRef<RTCPeerConnection | null>(null);
   const channelRef = useRef<RTCDataChannel | null>(null);
   const incomingRecordsRef = useRef(new Map<string, IncomingRecord>());
+  const expectedIncomingFilesRef = useRef<number | null>(null);
   const transferFinishedRef = useRef(false);
 
   const totalBytes = useMemo(() => files.reduce((total, item) => total + item.file.size, 0), [files]);
@@ -527,6 +589,7 @@ export default function TransferlyApp() {
     setReceiverOfferInput("");
     setScannerKind(null);
     setBytesSent(0);
+    expectedIncomingFilesRef.current = null;
     transferFinishedRef.current = false;
   }, [cleanupPeer, clearIncomingFiles]);
 
@@ -575,6 +638,7 @@ export default function TransferlyApp() {
   const sendFilesOverChannel = useCallback(async (channel: RTCDataChannel, queue: SelectedFile[]) => {
     transferFinishedRef.current = false;
     try {
+      const receiverReady = waitForControlMessage(channel, "ready");
       channel.send(
         JSON.stringify({
           type: "transfer-start",
@@ -582,6 +646,7 @@ export default function TransferlyApp() {
           totalBytes,
         } satisfies ControlMessage),
       );
+      await receiverReady;
 
       let completedBytes = 0;
       let lastUpdate = 0;
@@ -626,6 +691,7 @@ export default function TransferlyApp() {
       }
 
       channel.send(JSON.stringify({ type: "transfer-end" } satisfies ControlMessage));
+      await waitForControlMessage(channel, "transfer-ack");
       transferFinishedRef.current = true;
       setConnectionStatus("complete");
     } catch (sendError) {
@@ -639,20 +705,36 @@ export default function TransferlyApp() {
     (channel: RTCDataChannel, queue: SelectedFile[]) => {
       channel.binaryType = "arraybuffer";
       channel.bufferedAmountLowThreshold = CHANNEL_LOW_WATER_MARK;
-      channel.addEventListener("open", () => {
+      let started = false;
+      const openTimeout = window.setTimeout(() => {
+        if (!started && channel.readyState !== "open") {
+          setConnectionStatus("error");
+          setError("The receiver did not connect. Scan the sender code again and try once more.");
+        }
+      }, 120_000);
+      const handleOpen = () => {
+        if (started) return;
+        started = true;
+        window.clearTimeout(openTimeout);
         setConnectionStatus("sending");
         void sendFilesOverChannel(channel, queue);
-      });
-      channel.addEventListener("close", () => {
+      };
+      const handleClose = () => {
+        window.clearTimeout(openTimeout);
         if (!transferFinishedRef.current) {
           setConnectionStatus("error");
           setError("The connection closed before the transfer finished.");
         }
-      });
-      channel.addEventListener("error", () => {
+      };
+      const handleError = () => {
+        window.clearTimeout(openTimeout);
         setConnectionStatus("error");
         setError("The browser reported a problem with the direct connection.");
-      });
+      };
+      channel.addEventListener("open", handleOpen);
+      channel.addEventListener("close", handleClose);
+      channel.addEventListener("error", handleError);
+      if (channel.readyState === "open") handleOpen();
     },
     [sendFilesOverChannel],
   );
@@ -672,6 +754,16 @@ export default function TransferlyApp() {
     try {
       const peer = createPeerConnection();
       peerRef.current = peer;
+      peer.addEventListener("connectionstatechange", () => {
+        if (peerRef.current !== peer) return;
+        if (peer.connectionState === "failed") {
+          setConnectionStatus("error");
+          setError("The devices could not establish a direct connection. Keep both devices on the same Wi-Fi or hotspot and try again.");
+        } else if (peer.connectionState === "closed" && !transferFinishedRef.current) {
+          setConnectionStatus("error");
+          setError("The direct connection closed before the transfer finished.");
+        }
+      });
       const channel = peer.createDataChannel("transferly-files", { ordered: true });
       channelRef.current = channel;
       attachSenderChannel(channel, files);
@@ -745,7 +837,11 @@ export default function TransferlyApp() {
     }
 
     if (message.type === "transfer-start") {
+      expectedIncomingFilesRef.current = message.totalFiles;
       setConnectionStatus("receiving");
+      if (channelRef.current?.readyState === "open") {
+        channelRef.current.send(JSON.stringify({ type: "ready" } satisfies ControlMessage));
+      }
       return;
     }
 
@@ -779,6 +875,15 @@ export default function TransferlyApp() {
     if (message.type === "file-end") {
       const record = incomingRecordsRef.current.get(message.id);
       if (!record) return;
+      if (record.received !== record.size) {
+        record.status = "error";
+        setConnectionStatus("error");
+        setError(`The file ${record.name} arrived incomplete. Ask the sender to try again.`);
+        if (channelRef.current?.readyState === "open") {
+          channelRef.current.send(JSON.stringify({ type: "cancel", reason: "A file arrived incomplete." } satisfies ControlMessage));
+        }
+        return;
+      }
       const blob = new Blob(record.chunks, { type: record.mime });
       const downloadUrl = URL.createObjectURL(blob);
       record.status = "complete";
@@ -793,6 +898,20 @@ export default function TransferlyApp() {
     }
 
     if (message.type === "transfer-end") {
+      const records = Array.from(incomingRecordsRef.current.values());
+      const expectedFiles = expectedIncomingFilesRef.current;
+      if (
+        (expectedFiles !== null && records.length !== expectedFiles) ||
+        records.some((record) => record.status !== "complete")
+      ) {
+        setConnectionStatus("error");
+        setError("The transfer ended before every file was received.");
+        return;
+      }
+
+      if (channelRef.current?.readyState === "open") {
+        channelRef.current.send(JSON.stringify({ type: "transfer-ack" } satisfies ControlMessage));
+      }
       transferFinishedRef.current = true;
       setConnectionStatus("complete");
       return;
@@ -807,18 +926,33 @@ export default function TransferlyApp() {
   const attachReceiverChannel = useCallback(
     (channel: RTCDataChannel) => {
       channel.binaryType = "arraybuffer";
-      channel.addEventListener("open", () => setConnectionStatus("receiving"));
-      channel.addEventListener("message", (event) => void handleIncomingMessage(event));
-      channel.addEventListener("close", () => {
+      let messageQueue = Promise.resolve();
+      const handleOpen = () => setConnectionStatus("receiving");
+      const handleMessage = (event: MessageEvent) => {
+        // Keep control messages behind the preceding binary chunks. This is
+        // important because Blob -> ArrayBuffer conversion is asynchronous.
+        messageQueue = messageQueue
+          .then(() => handleIncomingMessage(event))
+          .catch((messageError: unknown) => {
+            setConnectionStatus("error");
+            setError(messageError instanceof Error ? messageError.message : "The receiver could not process the file data.");
+          });
+      };
+      const handleClose = () => {
         if (!transferFinishedRef.current) {
           setConnectionStatus("error");
           setError("The connection closed before the transfer finished.");
         }
-      });
-      channel.addEventListener("error", () => {
+      };
+      const handleError = () => {
         setConnectionStatus("error");
         setError("The browser reported a problem with the direct connection.");
-      });
+      };
+      channel.addEventListener("open", handleOpen);
+      channel.addEventListener("message", handleMessage);
+      channel.addEventListener("close", handleClose);
+      channel.addEventListener("error", handleError);
+      if (channel.readyState === "open") handleOpen();
     },
     [handleIncomingMessage],
   );
@@ -839,6 +973,16 @@ export default function TransferlyApp() {
       try {
         const peer = createPeerConnection();
         peerRef.current = peer;
+        peer.addEventListener("connectionstatechange", () => {
+          if (peerRef.current !== peer) return;
+          if (peer.connectionState === "failed") {
+            setConnectionStatus("error");
+            setError("The devices could not establish a direct connection. Keep both devices on the same Wi-Fi or hotspot and try again.");
+          } else if (peer.connectionState === "closed" && !transferFinishedRef.current) {
+            setConnectionStatus("error");
+            setError("The direct connection closed before the transfer finished.");
+          }
+        });
         peer.addEventListener("datachannel", (event) => {
           channelRef.current = event.channel;
           attachReceiverChannel(event.channel);

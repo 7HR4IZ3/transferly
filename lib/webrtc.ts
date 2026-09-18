@@ -1,12 +1,18 @@
 import { decodeSignal, encodeSignal, type SignalDescription } from "./signal";
 
 export const LOCAL_RTC_CONFIGURATION: RTCConfiguration = {
-  // An empty ICE server list keeps the default mode local-only and usable without internet.
+  // Host candidates keep the default mode local-only and usable without internet.
   iceServers: [],
 };
 
 export function createPeerConnection() {
-  return new RTCPeerConnection(LOCAL_RTC_CONFIGURATION);
+  // STUN is best-effort: it can improve connections across different networks when
+  // internet is available, but it is never required for same-network offline use.
+  const iceServers = typeof navigator !== "undefined" && navigator.onLine
+    ? [{ urls: ["stun:stun.l.google.com:19302", "stun1.l.google.com:19302"] }]
+    : LOCAL_RTC_CONFIGURATION.iceServers;
+
+  return new RTCPeerConnection({ ...LOCAL_RTC_CONFIGURATION, iceServers });
 }
 
 export function waitForIceGatheringComplete(connection: RTCPeerConnection, timeoutMs = 8000) {
