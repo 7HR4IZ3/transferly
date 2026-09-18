@@ -4,8 +4,8 @@
   "description": "Direct, local browser-to-browser file transfers.",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#f6f5ef",
-  "theme_color": "#f6f5ef",
+  "background_color": "#f7f7f3",
+  "theme_color": "#f7f7f3",
   "orientation": "any",
   "icons": [
     {

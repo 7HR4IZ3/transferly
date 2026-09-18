@@ -182,7 +182,7 @@ function HomeView({
 }) {
   return (
     <section className="hero">
-      <p className="eyebrow">Private by default · local first</p>
+      <p className="eyebrow">Private file transfer</p>
       <div className="hero-grid">
         <div>
           <h1>
@@ -190,18 +190,13 @@ function HomeView({
             <br />
             Keep the <em>cloud out.</em>
           </h1>
-          <div className="capability-row" aria-label="Transferly capabilities">
-            <span className="capability">No account</span>
-            <span className="capability">No upload queue</span>
-            <span className="capability">Works offline</span>
-          </div>
         </div>
         <p className="hero-copy">
-          Transferly creates a direct browser-to-browser connection. Your files move between devices, not through a
-          storage bucket.
-          <br />
-          <br />
-          <strong>For offline transfers, keep both devices on the same Wi-Fi network or hotspot.</strong>
+          A direct browser-to-browser transfer. Your files move between devices, not through a storage bucket.
+          <span className="hero-note">
+            <Wifi size={16} />
+            <strong>Works offline on the same Wi-Fi or hotspot.</strong>
+          </span>
         </p>
       </div>
 
@@ -209,15 +204,15 @@ function HomeView({
         <button className="action-card send" onClick={() => onStart("send")} type="button">
           <span className="action-card-top">
             <span>
-              <span className="action-card-kicker">I have the files</span>
-              <h2>Send something</h2>
+              <span className="action-card-kicker">Start here</span>
+              <h2>Send files</h2>
             </span>
             <span className="action-icon">
               <ArrowUp size={21} />
             </span>
           </span>
           <span className="action-card-bottom">
-            <span>Choose files, pair with another browser, and send directly.</span>
+            <span>Choose files and show a QR code.</span>
             <span className="arrow-link">
               <ArrowRight size={18} />
             </span>
@@ -227,7 +222,7 @@ function HomeView({
         <button className="action-card receive" onClick={() => onStart("receive")} type="button">
           <span className="action-card-top">
             <span>
-              <span className="action-card-kicker">I am receiving</span>
+              <span className="action-card-kicker">Join a transfer</span>
               <h2>Receive files</h2>
             </span>
             <span className="action-icon">
@@ -235,7 +230,7 @@ function HomeView({
             </span>
           </span>
           <span className="action-card-bottom">
-            <span>Scan or paste a pairing code and save the files locally.</span>
+            <span>Scan the sender&apos;s QR code with your camera.</span>
             <span className="arrow-link">
               <ArrowRight size={18} />
             </span>
@@ -245,20 +240,20 @@ function HomeView({
 
       <div className="why-row">
         <div className="why-card">
-          <strong>One clean promise</strong>
-          <p>Transferly does not create a cloud copy of the files you select.</p>
+          <strong>No account</strong>
+          <p>Open the app and start. There is nothing to sign up for.</p>
         </div>
         <div className="why-card">
           <strong>
-            <Wifi size={15} /> {online ? "Online now" : "Offline now"}
+            <Wifi size={15} /> {online ? "Ready to cache" : "Offline-ready"}
           </strong>
-          <p>{online ? "The app can update its offline shell." : "The cached app is still ready to open."}</p>
+          <p>{online ? "The app can refresh its local shell." : "The cached app can still open."}</p>
         </div>
         <div className="why-card">
           <strong>
             <Lock size={15} /> Direct channel
           </strong>
-          <p>WebRTC encrypts the browser-to-browser data channel.</p>
+          <p>No cloud copy is created while files are moving.</p>
         </div>
       </div>
 
@@ -328,16 +323,11 @@ function QrDisplay({
       {imageUrl ? <img alt="Pairing code" src={imageUrl} /> : <span className="empty-state">Preparing pairing code…</span>}
       <figcaption>
         {frames.length > 1
-          ? "Hold this screen up to the other device. The code cycles through multiple frames."
-          : "Show this code to the other device, or use copy/paste below."}
+          ? "Hold this screen steady. The code changes automatically."
+          : "Hold this screen up to the other device."}
       </figcaption>
-      {frames.length > 1 ? (
-        <span className="frame-count">
-          Frame {frameIndex + 1} of {frames.length}
-        </span>
-      ) : null}
       <button className="text-button" onClick={onCopy} type="button">
-        <Copy size={14} /> Copy full code
+        <Copy size={14} /> Copy code instead
       </button>
     </figure>
   );
@@ -356,7 +346,6 @@ function QrScannerPanel({
   const onCompleteRef = useRef(onComplete);
   const [status, setStatus] = useState("Requesting camera access…");
   const [error, setError] = useState("");
-  const [progress, setProgress] = useState({ current: 0, total: 1 });
 
   useEffect(() => {
     onCompleteRef.current = onComplete;
@@ -378,13 +367,14 @@ function QrScannerPanel({
           (result) => {
             const raw = typeof result === "string" ? result : (result as { data: string }).data;
             const collected = collectSignalFrame(frameMapRef.current, raw);
-            setProgress({ current: collected.progress, total: collected.total });
 
             if (collected.signal && active) {
               active = false;
               scanner.stop();
               scanner.destroy();
               onCompleteRef.current(collected.signal);
+            } else if (active && collected.total > 1) {
+              setStatus("Reading the pairing code…");
             }
           },
           {
@@ -422,10 +412,7 @@ function QrScannerPanel({
         <span className="scanner-frame" />
       </div>
       <div className="scanner-controls">
-        <p>
-          {status}
-          {progress.total > 1 ? " " + progress.current + "/" + progress.total + " frames captured." : ""}
-        </p>
+        <p>{status}</p>
         <button className="button secondary" onClick={onCancel} type="button">
           Close
         </button>
@@ -909,70 +896,83 @@ export default function TransferlyApp() {
     setSignalFrames([]);
   }, [cleanupPeer]);
 
-  const renderSignalActions = (kind: ScanKind) => {
-    const isOffer = kind === "offer";
-    const rawSignal = isOffer ? senderSignal : receiverSignal;
-
-    return (
-      <div className="signal-layout">
-        <QrDisplay
-          frames={signalFrames}
-          onCopy={() => void copyText(rawSignal)}
-        />
-        <div className="signal-tools">
+  const renderSenderOfferActions = () => (
+    <div className="signal-layout">
+      <QrDisplay frames={signalFrames} onCopy={() => void copyText(senderSignal)} />
+      <div className="signal-tools">
+        <div className="signal-intro">
+          <span className="signal-step">1</span>
           <div>
-            <p className="section-kicker">{isOffer ? "Step 2 · receiver pairs" : "Step 3 · sender confirms"}</p>
-            <h2>{isOffer ? "Show this pairing code" : "Send this answer back"}</h2>
-            <p className="signal-help">
-              {isOffer
-                ? "The other device should scan this code, then create an answer."
-                : "The sender should scan this code or paste it into the sender screen."}
-            </p>
-          </div>
-
-          <div className="inline-actions">
-            <button
-              className="button secondary"
-              onClick={() => void copyText(rawSignal)}
-              type="button"
-            >
-              <Copy size={15} /> Copy code
-            </button>
-            <button
-              className="button secondary"
-              onClick={() => setScannerKind(isOffer ? "answer" : "offer")}
-              type="button"
-            >
-              <Camera size={15} /> {isOffer ? "Scan answer" : "Scan offer"}
-            </button>
-          </div>
-
-          <label>
-            {isOffer ? "Paste the receiver answer here" : "Paste the sender offer here"}
-            <textarea
-              className="signal-input"
-              onChange={(event) => (isOffer ? setSenderAnswerInput(event.target.value) : setReceiverOfferInput(event.target.value))}
-              placeholder={isOffer ? "TL1.…" : "TL1.…"}
-              value={isOffer ? senderAnswerInput : receiverOfferInput}
-            />
-          </label>
-
-          <div className="inline-actions">
-            <button
-              className="button soft"
-              onClick={() => void (isOffer ? applySenderAnswer(senderAnswerInput) : createAnswerFromOffer(receiverOfferInput))}
-              type="button"
-            >
-              <LinkIcon size={15} /> {isOffer ? "Connect and send" : "Create answer"}
-            </button>
-            <button className="button danger" onClick={cancelTransfer} type="button">
-              Cancel
-            </button>
+            <p className="section-kicker">Receiver scans</p>
+            <h2>Show this to the receiver</h2>
+            <p className="signal-help">Keep this screen open. The receiver will show a reply code next.</p>
           </div>
         </div>
+
+        <button className="button soft wide-button" onClick={() => setScannerKind("answer")} type="button">
+          <Camera size={17} /> Scan receiver reply
+        </button>
+
+        <details className="fallback-panel">
+          <summary>Use a text code instead</summary>
+          <div className="fallback-content">
+            <p>Copy the receiver&apos;s reply code and paste it here if scanning is not available.</p>
+            <label className="signal-label">
+              <span>Receiver reply code</span>
+              <textarea
+                className="signal-input"
+                onChange={(event) => setSenderAnswerInput(event.target.value)}
+                placeholder="Paste the reply code"
+                value={senderAnswerInput}
+              />
+            </label>
+            <button className="button secondary" onClick={() => void applySenderAnswer(senderAnswerInput)} type="button">
+              <LinkIcon size={16} /> Connect and send
+            </button>
+          </div>
+        </details>
+
+        <button className="text-button cancel-button" onClick={cancelTransfer} type="button">
+          Cancel pairing
+        </button>
       </div>
-    );
-  };
+    </div>
+  );
+
+  const renderReceiverAnswerActions = () => (
+    <div className="signal-layout">
+      <QrDisplay frames={signalFrames} onCopy={() => void copyText(receiverSignal)} />
+      <div className="signal-tools">
+        <div className="signal-intro">
+          <span className="signal-step">2</span>
+          <div>
+            <p className="section-kicker">Sender scans</p>
+            <h2>Show this reply to the sender</h2>
+            <p className="signal-help">The sender scans this screen. The direct connection will start automatically.</p>
+          </div>
+        </div>
+
+        <div className="answer-note">
+          <Check size={18} />
+          <span>Offer received. Your answer is ready.</span>
+        </div>
+
+        <details className="fallback-panel">
+          <summary>Send the code another way</summary>
+          <div className="fallback-content">
+            <p>Copy this reply code and send it to the sender.</p>
+            <button className="button secondary" onClick={() => void copyText(receiverSignal)} type="button">
+              <Copy size={16} /> Copy reply code
+            </button>
+          </div>
+        </details>
+
+        <button className="text-button cancel-button" onClick={cancelTransfer} type="button">
+          Cancel pairing
+        </button>
+      </div>
+    </div>
+  );
 
   const renderSendingWorkspace = () => {
     const sendProgress = totalBytes ? Math.min(100, (bytesSent / totalBytes) * 100) : 0;
@@ -983,14 +983,14 @@ export default function TransferlyApp() {
           <div className="section-heading">
             <div>
               <p className="section-kicker">Local pairing</p>
-              <h2>Pair with the receiving browser</h2>
-              <p>Both devices should be on the same Wi-Fi network or hotspot. The code only describes how to connect.</p>
+              <h2>Connect to the receiver</h2>
+              <p>Both devices should be on the same Wi-Fi network or hotspot. The receiver scans first.</p>
             </div>
             <span className="mode-pill">
-              <span className="status-dot" /> Waiting
+              <span className="status-dot" /> Waiting for scan
             </span>
           </div>
-          {renderSignalActions("offer")}
+          {renderSenderOfferActions()}
         </div>
       );
     }
@@ -1054,9 +1054,9 @@ export default function TransferlyApp() {
         <div className="workspace-card">
           <div className="section-heading">
             <div>
-              <p className="section-kicker">Step 1 · choose files</p>
+              <p className="section-kicker">Choose files</p>
               <h2>What are you sending?</h2>
-              <p>Files stay in this browser until the direct channel is open.</p>
+              <p>Files stay in this browser until you connect to the receiver.</p>
             </div>
             {files.length ? <span className="mode-pill">{files.length} selected</span> : null}
           </div>
@@ -1101,7 +1101,7 @@ export default function TransferlyApp() {
           {files.length ? (
             <div className="inline-actions" style={{ marginTop: 16 }}>
               <button className="button soft" disabled={connectionStatus === "preparing"} onClick={() => void createOffer()} type="button">
-                <LinkIcon size={15} /> Create pairing code
+                <Camera size={16} /> Show QR code
               </button>
               <span className="mini-label">{formatBytes(totalBytes)} total</span>
             </div>
@@ -1120,38 +1120,20 @@ export default function TransferlyApp() {
   };
 
   const renderReceivingWorkspace = () => {
-    if (signalKind === "offer" && connectionStatus === "waiting") {
-      return (
-        <div className="workspace-card">
-          <div className="section-heading">
-            <div>
-              <p className="section-kicker">Local pairing</p>
-              <h2>Send the offer to this browser</h2>
-              <p>Scan the sender&apos;s code or paste it below. The sender will receive an answer next.</p>
-            </div>
-            <span className="mode-pill">
-              <span className="status-dot" /> Ready
-            </span>
-          </div>
-          {renderSignalActions("offer")}
-        </div>
-      );
-    }
-
     if (signalKind === "answer" && connectionStatus === "waiting") {
       return (
         <div className="workspace-card">
           <div className="section-heading">
             <div>
-              <p className="section-kicker">Answer ready</p>
-              <h2>Return this code to the sender</h2>
-              <p>Once the sender scans or pastes it, the direct channel will open here.</p>
+              <p className="section-kicker">Reply ready</p>
+              <h2>Let the sender scan</h2>
+              <p>Keep this screen open while the sender scans your reply.</p>
             </div>
             <span className="mode-pill">
-              <span className="status-dot" /> Waiting
+              <span className="status-dot" /> Waiting for scan
             </span>
           </div>
-          {renderSignalActions("answer")}
+          {renderReceiverAnswerActions()}
         </div>
       );
     }
@@ -1221,38 +1203,41 @@ export default function TransferlyApp() {
         <div className="workspace-card">
           <div className="section-heading">
             <div>
-              <p className="section-kicker">Step 1 · pair with sender</p>
+              <p className="section-kicker">Scan to connect</p>
               <h2>Ready to receive</h2>
-              <p>Scan the sender&apos;s cycling QR code, or paste the complete pairing code below.</p>
+              <p>Point your camera at the sender&apos;s QR code. Transferly builds the reply for you.</p>
             </div>
             <span className="mode-pill">
-              <span className="status-dot" /> Local mode
+              <span className="status-dot" /> Waiting for sender
             </span>
           </div>
-          <div className="inline-actions" style={{ marginBottom: 16 }}>
-            <button className="button soft" onClick={() => setScannerKind("offer")} type="button">
-              <Camera size={15} /> Scan sender code
-            </button>
-          </div>
-          <label className="signal-tools">
-            <span>Paste the sender offer</span>
-            <textarea
-              className="signal-input"
-              onChange={(event) => setReceiverOfferInput(event.target.value)}
-              placeholder="TL1.…"
-              value={receiverOfferInput}
-            />
-          </label>
-          <div className="inline-actions" style={{ marginTop: 12 }}>
-            <button className="button" onClick={() => void createAnswerFromOffer(receiverOfferInput)} type="button">
-              <LinkIcon size={15} /> Create answer
-            </button>
-          </div>
+          <button className="button soft wide-button" onClick={() => setScannerKind("offer")} type="button">
+            <Camera size={17} /> Scan sender QR
+          </button>
+          <p className="action-hint">Allow camera access when your browser asks.</p>
+
+          <details className="fallback-panel">
+            <summary>Camera not available?</summary>
+            <div className="fallback-content">
+              <p>Ask the sender to copy their pairing code and send it to you.</p>
+              <label className="signal-label">
+                <span>Sender pairing code</span>
+                <textarea
+                  className="signal-input"
+                  onChange={(event) => setReceiverOfferInput(event.target.value)}
+                  placeholder="Paste the pairing code"
+                  value={receiverOfferInput}
+                />
+              </label>
+              <button className="button secondary" onClick={() => void createAnswerFromOffer(receiverOfferInput)} type="button">
+                <LinkIcon size={16} /> Use code
+              </button>
+            </div>
+          </details>
         </div>
         <div className="browser-note">
           <p>
-            <strong>Offline-ready.</strong> The app can pair locally without an internet connection once both devices are
-            on the same network.
+            <strong>Local mode.</strong> Both devices need the same Wi-Fi network or hotspot.
           </p>
           <span className="mini-label">{storageLabel}</span>
         </div>
@@ -1275,7 +1260,7 @@ export default function TransferlyApp() {
           ) : null}
           <span className="status-pill">
             <span className={"status-dot" + (online ? "" : " offline")} />
-            {online ? "Online · cache can update" : "Offline · cached shell"}
+            {online ? "Online, cache can update" : "Offline, cached shell"}
           </span>
         </div>
       </header>
@@ -1310,7 +1295,7 @@ export default function TransferlyApp() {
               </div>
             </div>
             <span className="mode-pill">
-              <Shield size={14} /> Direct · no cloud copy
+              <Shield size={14} /> Direct, no cloud copy
             </span>
           </div>
 
@@ -1326,10 +1311,10 @@ export default function TransferlyApp() {
           {scannerKind ? (
             <div className="workspace-card">
               <div className="section-heading">
-                <div>
+              <div>
                   <p className="section-kicker">Camera pairing</p>
-                  <h2>Scan the {scannerKind === "offer" ? "sender offer" : "receiver answer"}</h2>
-                  <p>The scanner collects all QR frames automatically when the code is longer than one screen.</p>
+                  <h2>Scan the {scannerKind === "offer" ? "sender QR" : "receiver reply"}</h2>
+                  <p>Hold the other screen steady. Transferly reads the full code automatically.</p>
                 </div>
                 <span className="mode-pill">
                   <Camera size={14} /> Camera on
@@ -1342,8 +1327,8 @@ export default function TransferlyApp() {
       )}
 
       <footer className="footer-bar">
-        <span>Transferly · direct by design</span>
-        <span>{serviceWorkerReady ? "Offline shell active" : "Offline shell loading"} · {storageLabel}</span>
+        <span>Transferly, direct by design</span>
+        <span>{serviceWorkerReady ? "Offline shell active" : "Offline shell loading"} | {storageLabel}</span>
       </footer>
     </main>
   );
@@ -1365,7 +1350,7 @@ function FileRow({
       <span className="file-type">{formatFileKind(file.name)}</span>
       <div className="file-meta">
         <p className="file-name" title={file.name}>{file.name}</p>
-        <p className="file-size">{formatBytes(file.size)} · {status === "sent" ? "Sent" : status === "sending" ? "Sending" : status === "error" ? "Failed" : "Ready"}</p>
+        <p className="file-size">{formatBytes(file.size)} | {status === "sent" ? "Sent" : status === "sending" ? "Sending" : status === "error" ? "Failed" : "Ready"}</p>
         {status === "sending" ? (
           <div className="file-progress">
             <div className="progress-track">
@@ -1386,7 +1371,7 @@ function IncomingRow({ file }: { file: IncomingFile }) {
       <div className="file-meta">
         <p className="file-name" title={file.name}>{file.name}</p>
         <p className="file-size">
-          {file.status === "complete" ? formatBytes(file.size) + " · Ready to download" : formatBytes(file.received) + " of " + formatBytes(file.size)}
+          {file.status === "complete" ? formatBytes(file.size) + " | Ready to download" : formatBytes(file.received) + " of " + formatBytes(file.size)}
         </p>
         {file.status === "receiving" ? (
           <div className="file-progress">
