@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import "./globals.css";
+import "./micro-interactions.css";
 
 export const metadata: Metadata = {
   title: "Transferly | Direct browser transfers",
