@@ -19,11 +19,14 @@ export interface SignalStore {
   /** Create the mailbox if the id is free. Returns false when already taken. */
   claim(id: string, secret: string): Promise<boolean>;
   /** Append a message. Returns false if the mailbox does not exist or is full. */
-  push(id: string, message: string): Promise<boolean>;
+  push(id: string, message: string): Promise<PushResult>;
   /** Drain all messages. Returns null if the mailbox is gone or the secret is wrong. */
   drain(id: string, secret: string): Promise<string[] | null>;
   release(id: string, secret: string): Promise<void>;
 }
+
+/** "missing": no such code; "full": the owner isn't collecting messages right now. */
+export type PushResult = "ok" | "missing" | "full";
 
 type MemoryMailbox = { secret: string; messages: string[]; expiresAt: number };
 
@@ -51,11 +54,12 @@ class MemoryStore implements SignalStore {
     return true;
   }
 
-  async push(id: string, message: string) {
+  async push(id: string, message: string): Promise<PushResult> {
     const box = this.live(id);
-    if (!box || box.messages.length >= MAX_MESSAGES) return false;
+    if (!box) return "missing";
+    if (box.messages.length >= MAX_MESSAGES) return "full";
     box.messages.push(message);
-    return true;
+    return "ok";
   }
 
   async drain(id: string, secret: string) {
@@ -97,17 +101,18 @@ class UpstashStore implements SignalStore {
     return result === "OK";
   }
 
-  async push(id: string, message: string) {
+  async push(id: string, message: string): Promise<PushResult> {
     const [exists, length] = await this.pipeline([
       ["EXISTS", "tl:box:" + id],
       ["LLEN", "tl:msg:" + id],
     ]);
-    if (exists !== 1 || Number(length) >= MAX_MESSAGES) return false;
+    if (exists !== 1) return "missing";
+    if (Number(length) >= MAX_MESSAGES) return "full";
     await this.pipeline([
       ["RPUSH", "tl:msg:" + id, message],
       ["EXPIRE", "tl:msg:" + id, MAILBOX_TTL_SECONDS],
     ]);
-    return true;
+    return "ok";
   }
 
   async drain(id: string, secret: string) {

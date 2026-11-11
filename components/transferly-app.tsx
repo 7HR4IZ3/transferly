@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState, type ChangeEvent, type DragEvent } from "react";
 import { ArrowDown, ArrowUp, Check, Copy, Download, Lock, Plus, QrIcon, XIcon } from "./icons";
 import { QrCode, QrScanner } from "./qr";
-import { Mailbox, PairingError, formatCode, isValidCode, randomToken, reportRelayUsage, type SignalMessage } from "../lib/pairing";
+import { CODE_LIFETIME_MS, Mailbox, PairingError, formatCode, isValidCode, randomToken, reportRelayUsage, type SignalMessage } from "../lib/pairing";
 import { PeerLink, loadIceConfig, type IceConfig, type LinkState, type Route, type Transfer } from "../lib/peer";
 import { packSignal, unpackSignal } from "../lib/qr-signal";
 
@@ -50,6 +50,8 @@ export default function TransferlyApp() {
   const [scanBusy, setScanBusy] = useState(false);
   const [route, setRoute] = useState<Route | null>(null);
   const [relayMaxBytes, setRelayMaxBytes] = useState(0);
+  const [codeExpiresAt, setCodeExpiresAt] = useState(0);
+  const [now, setNow] = useState(0);
   const [transfers, setTransfers] = useState<Transfer[]>([]);
   const [copied, setCopied] = useState(false);
   const [dragging, setDragging] = useState(false);
@@ -62,6 +64,7 @@ export default function TransferlyApp() {
   const requestRef = useRef<string | null>(null);
   const qrStepRef = useRef<QrStep | null>(null);
   const relayUnavailableRef = useRef<string | undefined>(undefined);
+  const inputRef = useRef("");
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -324,6 +327,8 @@ export default function TransferlyApp() {
     (mailbox: Mailbox) => {
       mailboxRef.current = mailbox;
       setOffline(false);
+      setCodeExpiresAt(mailbox.expiresAt);
+      setNow(Date.now());
       setMyCode(mailbox.code);
       go("idle");
     },
@@ -347,29 +352,51 @@ export default function TransferlyApp() {
     Mailbox.claim().then(adoptMailbox, claimFailed);
   }, [adoptMailbox, claimFailed, go]);
 
-  // Claim a code on first load and release it when the page goes away.
+  // Claim a code on first load.
+  //
+  // The code is deliberately NOT released on "pagehide": phones fire it when you
+  // merely switch apps (e.g. to send someone the code), which used to leave a
+  // dead code on screen. A closed tab's code simply expires on the server.
   useEffect(() => {
     let cancelled = false;
     Mailbox.claim().then(
       (mailbox) => (cancelled ? mailbox.release() : adoptMailbox(mailbox)),
       (err) => !cancelled && claimFailed(err),
     );
-    const release = () => {
-      mailboxRef.current?.release();
-      linkRef.current?.close();
-    };
-    // A page restored from the back/forward cache has a released code: start fresh.
-    const restore = (event: PageTransitionEvent) => event.persisted && window.location.reload();
-    window.addEventListener("pagehide", release);
-    window.addEventListener("pageshow", restore);
     return () => {
       cancelled = true;
-      window.removeEventListener("pagehide", release);
-      window.removeEventListener("pageshow", restore);
-      release();
+      mailboxRef.current?.release();
+      linkRef.current?.close();
       mailboxRef.current = null;
     };
   }, [adoptMailbox, claimFailed]);
+
+  useEffect(() => {
+    inputRef.current = input;
+  }, [input]);
+
+  /** Swap the shown code for a fresh one. */
+  const renewCode = useCallback(() => {
+    const old = mailboxRef.current;
+    mailboxRef.current = null;
+    setMyCode("");
+    old?.release();
+    claimCode();
+  }, [claimCode]);
+
+  // Tick the expiry ring, and renew the code when it runs out — but never in the
+  // middle of something (typing a code, an incoming request, pairing).
+  useEffect(() => {
+    if (!myCode) return;
+    const timer = setInterval(() => {
+      const time = Date.now();
+      setNow(time);
+      const mailbox = mailboxRef.current;
+      const quiet = phaseRef.current === "idle" && !requestRef.current && !qrStepRef.current && !inputRef.current;
+      if (mailbox && time >= mailbox.expiresAt && quiet) renewCode();
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [myCode, renewCode]);
 
   // Cache the app for offline use (production only, so dev builds never go stale).
   useEffect(() => {
@@ -689,7 +716,12 @@ export default function TransferlyApp() {
         ) : !paired ? (
           <>
             <div className="block">
-              <p className="label">Share your code</p>
+              <div className="code-head">
+                <p className="label">Share your code</p>
+                {myCode && codeExpiresAt ? (
+                  <ExpiryRing onRenew={renewCode} remaining={codeExpiresAt - now} total={CODE_LIFETIME_MS} />
+                ) : null}
+              </div>
               <div className="my-code">
                 <span className={"code" + (myCode ? "" : " code-loading")}>{myCode ? formatCode(myCode) : "··· ···"}</span>
                 {myCode ? (
@@ -827,6 +859,40 @@ export default function TransferlyApp() {
         <Lock size={13} /> Files go directly between browsers, encrypted. Nothing is uploaded.
       </footer>
     </main>
+  );
+}
+
+/** Countdown ring showing how long the current code stays valid. */
+function ExpiryRing({ remaining, total, onRenew }: { remaining: number; total: number; onRenew: () => void }) {
+  const left = Math.max(0, remaining);
+  const seconds = Math.ceil(left / 1000);
+  const label = Math.floor(seconds / 60) + ":" + String(seconds % 60).padStart(2, "0");
+  const radius = 7;
+  const circumference = 2 * Math.PI * radius;
+  const fraction = Math.min(1, left / total);
+
+  return (
+    <button
+      aria-label={"Code expires in " + label + ". Tap for a new code now."}
+      className={"expiry" + (left < 60_000 ? " expiry-low" : "")}
+      onClick={onRenew}
+      title="Codes renew automatically. Tap for a new one now."
+      type="button"
+    >
+      <svg aria-hidden height="18" viewBox="0 0 18 18" width="18">
+        <circle className="expiry-track" cx="9" cy="9" r={radius} />
+        <circle
+          className="expiry-fill"
+          cx="9"
+          cy="9"
+          r={radius}
+          strokeDasharray={circumference}
+          strokeDashoffset={circumference * (1 - fraction)}
+          transform="rotate(-90 9 9)"
+        />
+      </svg>
+      <span>{left > 0 ? label : "Renewing…"}</span>
+    </button>
   );
 }
 

@@ -182,6 +182,14 @@ type MailboxHandlers = {
 };
 
 const POLL_MS = 1200;
+/** How long a code is shown before it's replaced with a fresh one. */
+export const CODE_LIFETIME_MS = 10 * 60 * 1000;
+/**
+ * The server forgets a code after 10 min without contact. If polls keep failing
+ * (rate limits, flaky network, a frozen background tab) for this long, assume
+ * the code may be gone rather than keep showing a dead one.
+ */
+const POLL_STALE_MS = 8 * 60 * 1000;
 
 export class Mailbox {
   private handlers: MailboxHandlers | null = null;
@@ -191,6 +199,9 @@ export class Mailbox {
   private keepAlive: ReturnType<typeof setInterval> | undefined;
   private released = false;
   private retries = 0;
+  private lastContact = Date.now();
+  /** When this code stops being offered (the UI shows a countdown to this). */
+  readonly expiresAt = Date.now() + CODE_LIFETIME_MS;
 
   private constructor(
     readonly code: string,
@@ -351,9 +362,10 @@ export class Mailbox {
       if (!this.handlers || this.released) return;
       try {
         const { messages = [] } = await call({ action: "poll", id: this.id, secret: this.secret });
+        this.lastContact = Date.now();
         messages.forEach((sealed) => this.deliver(sealed));
       } catch (error) {
-        if (error instanceof PairingError && error.status === 410) {
+        if ((error instanceof PairingError && error.status === 410) || Date.now() - this.lastContact > POLL_STALE_MS) {
           this.handlers?.onLost();
           return;
         }

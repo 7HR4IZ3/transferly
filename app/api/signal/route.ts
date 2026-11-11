@@ -10,7 +10,8 @@ const MAX_MESSAGE_LENGTH = 32 * 1024;
 // Small best-effort limiter so codes can't be guessed in bulk from one client.
 // Per-instance only; put a real rate limiter in front for large deployments.
 const hits = new Map<string, { count: number; resetAt: number }>();
-const LIMITS = { claim: 20, send: 30, poll: 240, release: 30 } as const;
+// Generous, because a household or phone hotspot shares one public IP across devices and tabs.
+const LIMITS = { claim: 30, send: 60, poll: 900, release: 60 } as const;
 
 function limited(request: NextRequest, action: keyof typeof LIMITS) {
   const ip = request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || request.headers.get("x-real-ip") || "local";
@@ -63,7 +64,14 @@ export async function POST(request: NextRequest) {
         if (typeof message !== "string" || !message || message.length > MAX_MESSAGE_LENGTH) {
           return reply(400, { error: "Invalid message." });
         }
-        return (await store.push(id, message)) ? reply(200, { ok: true }) : reply(404, { error: "Code not found." });
+        switch (await store.push(id, message)) {
+          case "missing":
+            return reply(404, { error: "Code not found." });
+          case "full":
+            return reply(429, { error: "That device is busy. Try again in a moment." });
+          default:
+            return reply(200, { ok: true });
+        }
       case "poll": {
         const messages = await store.drain(id, secret as string);
         return messages ? reply(200, { messages }) : reply(410, { error: "Code expired." });

@@ -165,6 +165,55 @@ button {
 
 /* Your code */
 
+.code-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.expiry {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px 2px 4px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+  transition: background 0.15s;
+}
+
+.expiry:hover {
+  background: var(--cell);
+}
+
+.expiry-track,
+.expiry-fill {
+  fill: none;
+  stroke-width: 2.5;
+}
+
+.expiry-track {
+  stroke: var(--line);
+}
+
+.expiry-fill {
+  stroke: var(--accent);
+  stroke-linecap: round;
+  transition: stroke-dashoffset 1s linear, stroke 0.3s;
+}
+
+.expiry-low {
+  color: #c27a12;
+}
+
+.expiry-low .expiry-fill {
+  stroke: #d39b2a;
+}
+
 .my-code {
   display: flex;
   align-items: center;

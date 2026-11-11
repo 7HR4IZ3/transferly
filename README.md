@@ -21,7 +21,7 @@ With no internet, the app still opens (it's cached after the first visit), and d
 
 ## User flow
 
-1. **Open the page on both devices.** Each one shows a code under **Share your code**, for example `482 913`.
+1. **Open the page on both devices.** Each one shows a code under **Share your code**, for example `482 913`. A small countdown ring next to it shows how long the code stays valid (10 minutes). The code renews itself when time runs out, but never while you're typing a code or pairing. Tap the ring to get a new code straight away.
 2. **One person types the other's code** under **Enter a code**. That device shows *Waiting for 482 913 to accept*, with **Cancel**.
 3. **The code's owner sees a prompt:** *615 207 wants to connect*, with **Decline** and **Accept**. `615 207` is the requester's own code, so the owner can check it against the requester's screen.
 4. **Accept.** Both screens switch to **Connected** and show a drop area. Either side can drop or choose files at any time, and both directions work at once.
@@ -197,7 +197,9 @@ Each file is sent as:
 | What | Value | Where |
 | --- | --- | --- |
 | Code length | 6 digits | `lib/pairing.ts` |
-| Mailbox lifetime | 10 min, renewed on every poll | `lib/server/store.ts` |
+| Code shown (countdown ring) | 10 min, then renewed automatically | `lib/pairing.ts` |
+| Mailbox lifetime on the server | 10 min after the last contact | `lib/server/store.ts`, `worker/src/index.ts` |
+| Fallback: give up on a code after failed polls | 8 min without a successful poll | `lib/pairing.ts` |
 | Messages waiting per mailbox | 16 max | `lib/server/store.ts` |
 | Max message size | 32 KB | `app/api/signal/route.ts`, `worker/src/index.ts` |
 | Poll interval (fallback only) | 1.2 s visible, 3.6 s hidden | `lib/pairing.ts` |
