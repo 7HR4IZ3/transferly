@@ -750,9 +750,19 @@ export default function TransferlyApp() {
                 Enter a code
               </label>
               <div className={"otp" + (phase !== "idle" ? " otp-locked" : "")}>
+                {/* Not a login/2FA field: keep browsers and password managers from offering autofill. */}
                 <input
                   id="peer-code"
-                  autoComplete="one-time-code"
+                  name="transferly-peer-code"
+                  type="text"
+                  autoComplete="off"
+                  autoCorrect="off"
+                  autoCapitalize="off"
+                  spellCheck={false}
+                  data-1p-ignore=""
+                  data-lpignore="true"
+                  data-bwignore=""
+                  data-form-type="other"
                   disabled={phase !== "idle" || !myCode}
                   inputMode="numeric"
                   maxLength={6}
