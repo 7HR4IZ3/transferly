@@ -1,9 +1,11 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState, type ChangeEvent, type DragEvent } from "react";
-import { ArrowDown, ArrowUp, Check, Copy, Download, Lock, Plus, XIcon } from "./icons";
+import { ArrowDown, ArrowUp, Check, Copy, Download, Lock, Plus, QrIcon, XIcon } from "./icons";
+import { QrCode, QrScanner } from "./qr";
 import { Mailbox, PairingError, formatCode, isValidCode, randomToken, type SignalMessage } from "../lib/pairing";
-import { PeerLink, type LinkState, type Transfer } from "../lib/peer";
+import { PeerLink, loadIceServers, type LinkState, type Transfer } from "../lib/peer";
+import { packSignal, unpackSignal } from "../lib/qr-signal";
 
 // requesting: we typed a code and are waiting for its owner to accept.
 type Phase = "loading" | "idle" | "requesting" | "connecting" | "connected" | "ended";
@@ -11,6 +13,18 @@ type Phase = "loading" | "idle" | "requesting" | "connecting" | "connected" | "e
 const POLL_MS = 1200;
 const CONNECT_TIMEOUT_MS = 30_000;
 const REQUEST_TIMEOUT_MS = 120_000;
+const QR_CONNECT_TIMEOUT_MS = 45_000;
+
+/**
+ * Offline (QR) pairing steps. The "host" shows a code; the "guest" scans it and
+ * shows a reply; the host's camera is already running under its code, so the
+ * host just points it at the reply.
+ *   host:  preparing → show-offer (camera on) → (connecting)
+ *   guest: scan-offer → show-answer → (connecting)
+ * Two scans are unavoidable offline: each browser must learn the other's
+ * DTLS certificate fingerprint before it will connect.
+ */
+type QrStep = "menu" | "preparing" | "show-offer" | "scan-offer" | "show-answer";
 
 function formatBytes(bytes: number) {
   if (bytes < 1024) return bytes + " B";
@@ -31,6 +45,10 @@ export default function TransferlyApp() {
   const [peerCode, setPeerCode] = useState("");
   const [error, setError] = useState("");
   const [request, setRequestState] = useState<string | null>(null);
+  const [offline, setOffline] = useState(false);
+  const [qrStep, setQrStepState] = useState<QrStep | null>(null);
+  const [qrText, setQrText] = useState("");
+  const [scanBusy, setScanBusy] = useState(false);
   const [transfers, setTransfers] = useState<Transfer[]>([]);
   const [copied, setCopied] = useState(false);
   const [dragging, setDragging] = useState(false);
@@ -41,12 +59,18 @@ export default function TransferlyApp() {
   const targetRef = useRef("");
   const sidRef = useRef("");
   const requestRef = useRef<string | null>(null);
+  const qrStepRef = useRef<QrStep | null>(null);
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const go = useCallback((next: Phase) => {
     phaseRef.current = next;
     setPhase(next);
+  }, []);
+
+  const setQrStep = useCallback((step: QrStep | null) => {
+    qrStepRef.current = step;
+    setQrStepState(step);
   }, []);
 
   /** Incoming connection request awaiting Accept / Decline. */
@@ -76,9 +100,13 @@ export default function TransferlyApp() {
       setPeerCode("");
       setInput("");
       setError(message);
+      // Leaving a QR flow returns to its menu so the user can try again.
+      if (qrStepRef.current) setQrStep("menu");
+      setQrText("");
+      setScanBusy(false);
       go("idle");
     },
-    [go],
+    [go, setQrStep],
   );
 
   const armTimeout = useCallback(
@@ -101,31 +129,39 @@ export default function TransferlyApp() {
         mailboxRef.current = null;
         setMyCode("");
         setError("");
+        setQrStep(null);
         go("connected");
       } else if (state === "closed" || state === "failed") {
         if (phaseRef.current === "connected") {
           linkRef.current = null;
           go("ended");
         } else {
-          backToIdle("Couldn't open a direct connection. Try again, ideally on the same Wi-Fi.");
+          console.warn("Transferly: connection failed. Candidates —", link.describeCandidates());
+          backToIdle(
+            qrStepRef.current
+              ? "Couldn't connect. Make sure both devices are on the same Wi-Fi or hotspot, then try again."
+              : "Couldn't connect the two devices. Their networks may be blocking direct connections. Try the same Wi-Fi.",
+          );
         }
       }
     },
-    [backToIdle, go],
+    [backToIdle, go, setQrStep],
   );
 
   const newLink = useCallback(
-    (initiator: boolean) => {
+    (initiator: boolean, iceServers: RTCIceServer[], timeoutMs: number | null = CONNECT_TIMEOUT_MS) => {
       // Detach before closing so the old link's "closed" event is ignored.
       const previous = linkRef.current;
       linkRef.current = null;
       previous?.close();
-      const link: PeerLink = new PeerLink(initiator, {
-        onState: (state) => handleLinkState(link, state),
-        onTransfer: upsertTransfer,
-      });
+      const link: PeerLink = new PeerLink(
+        initiator,
+        { onState: (state) => handleLinkState(link, state), onTransfer: upsertTransfer },
+        iceServers,
+      );
       linkRef.current = link;
-      armTimeout(CONNECT_TIMEOUT_MS, "The connection timed out. Make sure both devices are online and try again.");
+      if (timeoutMs === null) clearTimeout(timeoutRef.current);
+      else armTimeout(timeoutMs, "The connection timed out. Make sure both devices are online and try again.");
       return link;
     },
     [armTimeout, handleLinkState, upsertTransfer],
@@ -138,7 +174,9 @@ export default function TransferlyApp() {
       go("connecting");
       const sid = randomToken(8);
       sidRef.current = sid;
-      const link = newLink(true);
+      const servers = await loadIceServers();
+      if (phaseRef.current !== "connecting" || targetRef.current !== to) return; // cancelled meanwhile
+      const link = newLink(true, servers);
       try {
         const sdp = await link.createOffer();
         if (linkRef.current !== link) return;
@@ -156,7 +194,9 @@ export default function TransferlyApp() {
       if (!from) return;
       go("connecting");
       sidRef.current = message.sid;
-      const link = newLink(false);
+      const servers = await loadIceServers();
+      if (phaseRef.current !== "connecting" || targetRef.current !== message.from) return;
+      const link = newLink(false, servers);
       try {
         const sdp = await link.acceptOffer(message.sdp);
         if (linkRef.current !== link) return;
@@ -185,7 +225,7 @@ export default function TransferlyApp() {
             if (me < from) await sendOffer(from);
             return;
           }
-          if (phaseNow !== "idle" || (requestRef.current && requestRef.current !== from)) {
+          if (phaseNow !== "idle" || qrStepRef.current || (requestRef.current && requestRef.current !== from)) {
             // Busy with someone else.
             void Mailbox.send(from, { kind: "decline", from: me }).catch(() => undefined);
             return;
@@ -269,6 +309,7 @@ export default function TransferlyApp() {
   const adoptMailbox = useCallback(
     (mailbox: Mailbox) => {
       mailboxRef.current = mailbox;
+      setOffline(false);
       setMyCode(mailbox.code);
       go("idle");
     },
@@ -277,7 +318,9 @@ export default function TransferlyApp() {
 
   const claimFailed = useCallback(
     (err: unknown) => {
-      setError(err instanceof Error ? err.message : "Couldn't get a code.");
+      // No server reachable: switch to offline QR pairing instead of showing an error.
+      if (err instanceof PairingError && (err.status === 0 || err.status >= 500)) setOffline(true);
+      else setError(err instanceof Error ? err.message : "Couldn't get a code.");
       go("idle");
     },
     [go],
@@ -313,6 +356,114 @@ export default function TransferlyApp() {
       mailboxRef.current = null;
     };
   }, [adoptMailbox, claimFailed]);
+
+  // Cache the app for offline use (production only, so dev builds never go stale).
+  useEffect(() => {
+    if (process.env.NODE_ENV !== "production" || !("serviceWorker" in navigator)) return;
+    navigator.serviceWorker.register("/sw.js").catch(() => undefined);
+  }, []);
+
+  // Follow connectivity: offline → QR pairing; back online → get a code again.
+  useEffect(() => {
+    const goneOffline = () => {
+      if (phaseRef.current !== "connected" && phaseRef.current !== "ended") setOffline(true);
+    };
+    const backOnline = () => {
+      const step = qrStepRef.current;
+      if (!mailboxRef.current && (phaseRef.current === "idle" || phaseRef.current === "loading") && (!step || step === "menu")) {
+        claimCode();
+      }
+    };
+    window.addEventListener("offline", goneOffline);
+    window.addEventListener("online", backOnline);
+    return () => {
+      window.removeEventListener("offline", goneOffline);
+      window.removeEventListener("online", backOnline);
+    };
+  }, [claimCode]);
+
+  // ---- Offline (QR) pairing -------------------------------------------------
+
+  /** Host: create an offer and show it as a QR code. */
+  const startQrHost = useCallback(async () => {
+    setError("");
+    setQrStep("preparing");
+    const servers = await loadIceServers();
+    // Camera permission lets browsers reveal real LAN addresses (instead of
+    // hidden .local names), which offline pairing relies on. It's needed to
+    // scan the reply anyway.
+    const camera = await navigator.mediaDevices?.getUserMedia({ video: true }).catch(() => null);
+    try {
+      if (qrStepRef.current !== "preparing") return;
+      const sid = randomToken(3);
+      sidRef.current = sid;
+      const link = newLink(true, servers, null); // no timeout while the guest scans
+      const sdp = await link.createOffer();
+      if (linkRef.current !== link || qrStepRef.current !== "preparing") return;
+      setQrText(packSignal("offer", sid, sdp));
+      setQrStep("show-offer");
+    } catch (err) {
+      backToIdle(err instanceof Error ? err.message : "Couldn't prepare a code.");
+    } finally {
+      camera?.getTracks().forEach((track) => track.stop());
+    }
+  }, [backToIdle, newLink, setQrStep]);
+
+  const handleScan = useCallback(
+    async (text: string) => {
+      let signal;
+      try {
+        signal = unpackSignal(text);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "That code couldn't be read.");
+        return;
+      }
+      const step = qrStepRef.current;
+
+      if (step === "scan-offer") {
+        if (signal.kind !== "offer") {
+          setError("That's a reply code. Scan the first code the other device shows.");
+          return;
+        }
+        setError("");
+        setScanBusy(true);
+        const servers = await loadIceServers();
+        if (qrStepRef.current !== "scan-offer") return;
+        // The scanner (and camera) stays on until the answer exists; see startQrHost.
+        const link = newLink(false, servers, null);
+        try {
+          const sdp = await link.acceptOffer(signal.sdp);
+          if (linkRef.current !== link) return;
+          sidRef.current = signal.sid;
+          setQrText(packSignal("answer", signal.sid, sdp));
+          setScanBusy(false);
+          setQrStep("show-answer");
+          armTimeout(QR_CONNECT_TIMEOUT_MS, "Not connected yet. Make sure the other device scanned your code and both are on the same Wi-Fi or hotspot.");
+        } catch {
+          backToIdle("That code couldn't be used. Try again.");
+        }
+      } else if (step === "show-offer") {
+        const link = linkRef.current;
+        if (signal.kind !== "answer") {
+          setError("That's your own code type. Scan the reply the other device shows.");
+          return;
+        }
+        if (signal.sid !== sidRef.current || !link?.initiator) {
+          setError("That reply belongs to a different code. Ask them to scan your code again.");
+          return;
+        }
+        setError("");
+        setScanBusy(true);
+        try {
+          await link.acceptAnswer(signal.sdp);
+          armTimeout(QR_CONNECT_TIMEOUT_MS, "Couldn't connect. Make sure both devices are on the same Wi-Fi or hotspot, then try again.");
+        } catch {
+          backToIdle("That reply couldn't be used. Try again.");
+        }
+      }
+    },
+    [armTimeout, backToIdle, newLink, setQrStep],
+  );
 
   // Poll our mailbox for offers and answers until we're connected.
   useEffect(() => {
@@ -446,6 +597,91 @@ export default function TransferlyApp() {
               </button>
             </div>
           </div>
+        ) : !paired && qrStep && qrStep !== "menu" ? (
+          <div className="qr-panel">
+            {qrStep === "preparing" ? (
+              <>
+                <span className="spinner spinner-lg" />
+                <p className="request-title">Getting ready…</p>
+                <p className="muted small">Allow camera access when asked. You&apos;ll use it to scan their reply.</p>
+              </>
+            ) : qrStep === "show-offer" ? (
+              <>
+                <p className="request-title">Scan this on the other device</p>
+                <QrCode value={qrText} />
+                <p className="muted small">
+                  They tap <strong>Scan a code</strong>, then show you a code back. Point your camera at it:
+                </p>
+                <QrScanner compact onResult={(text) => void handleScan(text)} paused={scanBusy} />
+                {scanBusy ? (
+                  <p className="status">
+                    <span className="spinner" /> Connecting…
+                  </p>
+                ) : null}
+              </>
+            ) : qrStep === "scan-offer" ? (
+              <>
+                <p className="request-title">Scan the other device&apos;s code</p>
+                <QrScanner onResult={(text) => void handleScan(text)} paused={scanBusy} />
+              </>
+            ) : (
+              <>
+                <p className="request-title">Now show this back to them</p>
+                <QrCode value={qrText} />
+                <p className="status">
+                  <span className="spinner" /> You&apos;ll connect as soon as they scan it
+                </p>
+              </>
+            )}
+            {error ? <p className="status status-error">{error}</p> : null}
+            <button className="link-button" onClick={() => backToIdle()} type="button">
+              Cancel
+            </button>
+          </div>
+        ) : !paired && (qrStep === "menu" || (offline && !myCode)) ? (
+          <div className="qr-panel">
+            {offline ? (
+              <p className="offline-badge">
+                <span className="dot" /> Offline
+              </p>
+            ) : null}
+            <span className="request-icon">
+              <QrIcon size={22} />
+            </span>
+            <p className="request-title">Connect with QR codes</p>
+            <p className="muted small">
+              Works without internet. Put both devices on the same Wi-Fi or phone hotspot. One shows a code, the other scans it, then you
+              swap.
+            </p>
+            <div className="request-actions">
+              <button
+                className="ghost-button"
+                onClick={() => {
+                  setError("");
+                  setQrStep("scan-offer");
+                }}
+                type="button"
+              >
+                Scan a code
+              </button>
+              <button className="primary-button" onClick={() => void startQrHost()} type="button">
+                Show my code
+              </button>
+            </div>
+            {error ? <p className="status status-error">{error}</p> : null}
+            {!offline ? (
+              <button
+                className="link-button"
+                onClick={() => {
+                  setError("");
+                  setQrStep(null);
+                }}
+                type="button"
+              >
+                Use a 6-digit code instead
+              </button>
+            ) : null}
+          </div>
         ) : !paired ? (
           <>
             <div className="block">
@@ -495,6 +731,19 @@ export default function TransferlyApp() {
 
               <Status phase={phase} peerCode={peerCode} error={error} onCancel={cancelPairing} />
             </div>
+
+            {phase === "idle" || phase === "loading" ? (
+              <button
+                className="link-button qr-link"
+                onClick={() => {
+                  setError("");
+                  setQrStep("menu");
+                }}
+                type="button"
+              >
+                <QrIcon size={15} /> No internet? Connect with QR codes
+              </button>
+            ) : null}
           </>
         ) : (
           <>

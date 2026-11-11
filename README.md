@@ -2,11 +2,14 @@
 
 Send files directly between two browsers. One person reads out their 6-digit code, the other types it in, the code's owner taps **Accept**, and the two browsers connect peer-to-peer. There are no accounts, links or long tokens to copy, and file data is never uploaded.
 
+With no internet, the app still opens (it's cached after the first visit), and devices on the same Wi-Fi or hotspot pair by scanning each other's QR codes.
+
 ## Contents
 
 - [User flow](#user-flow)
 - [Architecture](#architecture)
 - [Pairing protocol](#pairing-protocol)
+- [Offline mode](#offline-mode)
 - [File transfer protocol](#file-transfer-protocol)
 - [Security model](#security-model)
 - [Timeouts and limits](#timeouts-and-limits)
@@ -116,6 +119,41 @@ Rules each browser enforces:
 - **Busy.** If the device isn't idle or already has a pending prompt, a new `request` gets an automatic `decline`.
 - **No stale offers.** The offer is created only *after* Accept. However long the owner takes, the connection details (ICE candidates, NAT mappings) are fresh.
 
+## Offline mode
+
+### Opening the app offline
+
+`public/sw.js` is a service worker, registered in production builds only. The first online visit saves the page and every script and style it uses. After that, the address opens with no internet in the same browser.
+
+- **The page** is fetched from the network first, so new deploys show up. If the network fails, or doesn't respond within 4 s, the saved copy is used.
+- **`/_next/static/*`** files are content-hashed, so they're served from the cache. On every online visit the cache is refreshed, and files the new page no longer uses are deleted.
+- **`/api/*`** is never cached.
+
+iOS Safari can clear the saved copy of a site that hasn't been used for a few weeks. Adding the app to the Home Screen makes the copy last.
+
+### Pairing without a server (QR codes)
+
+If the pairing server can't be reached, the app switches to QR pairing on its own. You can also choose it any time with **No internet? Connect with QR codes**.
+
+1. **Host** taps **Show my code**. The browser asks for the camera, then creates a WebRTC offer and shows it as a QR code. A small camera view sits under the code.
+2. **Guest** taps **Scan a code** and scans it. The guest's browser creates an answer and shows it as a QR code.
+3. **Host** points the camera, which is already running, at the guest's screen. The devices connect directly over the shared Wi-Fi or hotspot.
+
+The QR codes don't contain a full WebRTC description (1–2 KB), only the fields that matter, packed into about 150 characters (`lib/qr-signal.ts`):
+
+```
+TLQ1~<o|a>~<session>~<mid>~<setup>~<ice-ufrag>~<ice-pwd>~<sha-256 fingerprint, base64url>~<candidates>
+candidate = <h|s|r><address>_<port>       e.g. h192.168.1.20_53412
+```
+
+The other side rebuilds a minimal SDP from these fields. This keeps each QR code small enough to scan easily from a screen.
+
+**Why two scans?** Each browser must know the other's DTLS certificate fingerprint before it will connect. The fingerprint is created randomly on each device, so with no server the only way to pass it across is the camera, once in each direction.
+
+**Why the camera permission is requested first:** without it, browsers hide LAN addresses behind random `.local` names (or, in Safari, leave them out entirely). Once camera access is granted they share the real addresses, which offline connections need.
+
+Online, QR pairing still uses the STUN/TURN servers, so it also works across networks.
+
 ## File transfer protocol
 
 The connection uses two **pre-negotiated data channels** (ids 0 and 1, ordered and reliable). The side that made the offer sends on channel 0 and receives on channel 1; the other side does the reverse. Each direction therefore has its own channel, and both people can send at once without their chunks mixing.
@@ -162,7 +200,8 @@ Each file is sent as:
 | Poll interval | 1.2 s visible, 3.6 s hidden | `components/transferly-app.tsx` |
 | Request expiry (unanswered) | 2 min | `components/transferly-app.tsx` |
 | Accept → connected timeout | 30 s | `components/transferly-app.tsx` |
-| ICE candidate gathering | waits up to 3 s | `lib/peer.ts` |
+| QR reply scanned → connected timeout | 45 s | `components/transferly-app.tsx` |
+| ICE candidate gathering | waits up to 5 s | `lib/peer.ts` |
 | Drop detection | 8 s in `disconnected` state | `lib/peer.ts` |
 | Chunk size | 64 KB | `lib/peer.ts` |
 | Send buffer high / low marks | 4 MB / 1 MB | `lib/peer.ts` |
@@ -192,17 +231,21 @@ To try it on one machine, open the app in two isolated sessions, for example a n
 | Variable | Purpose |
 | --- | --- |
 | `UPSTASH_REDIS_REST_URL` + `UPSTASH_REDIS_REST_TOKEN`, or `KV_REST_API_URL` + `KV_REST_API_TOKEN`, or any prefixed variant ending in `KV_REST_API_URL` / `KV_REST_API_TOKEN` (for example `UPSTASH_REDIS_REST_KV_REST_API_URL`) | Shared mailbox storage. **Required on serverless hosts such as Vercel**, where requests from the two devices can land on different instances. Without these variables an in-memory store is used, which works only with a single server process. |
-| `NEXT_PUBLIC_ICE_SERVERS` | Optional JSON array of `RTCIceServer` objects, e.g. `[{"urls":"stun:stun.l.google.com:19302"},{"urls":"turn:turn.example.com:3478","username":"u","credential":"p"}]`. Replaces the default Google STUN servers. It's read at build time. |
+| `CLOUDFLARE_TURN_KEY_ID` + `CLOUDFLARE_TURN_API_TOKEN` | **Recommended.** Cloudflare Realtime TURN relay. `/api/ice` creates short-lived relay credentials for each browser. |
+| `TURN_CREDENTIALS_URL` | Alternative: any URL that returns an `iceServers` array, e.g. Metered's `https://<app>.metered.live/api/v1/turn/credentials?apiKey=…`. |
+| `TURN_URLS` + `TURN_USERNAME` + `TURN_CREDENTIAL` | Alternative: your own TURN server (e.g. coturn). Takes comma-separated `turn:`/`turns:` URLs. |
+
+Without a TURN relay, devices on networks that block direct connections (mobile carriers, office and guest Wi-Fi, some home routers) fail with *Couldn't connect the two devices…*. The relay only forwards traffic, which stays DTLS-encrypted, so it can't read files. Browsers always try a direct path first; the relay is a fallback. When a connection fails, the browser console logs which kinds of route each side offered (`host` = local network, `srflx` = public address, `relay` = TURN).
 
 The app must be served over HTTPS (Vercel does this automatically).
 
 ## Known limitations
 
 - **Received files are held in memory** until saved, so multi-gigabyte files may be too much for a phone. Streaming straight to disk would fix this.
-- **Some networks block direct connections** (symmetric NAT, strict firewalls). Configure a TURN server for those cases.
+- **Some networks block direct connections.** Configure a TURN relay (see [Deploying](#deploying)).
 - **Both tabs must stay open**, and ideally in the foreground on mobile, until transfers finish. Interrupted transfers don't resume.
 - **Rate limiting is per server instance** and in memory. On serverless platforms, put a shared limiter (for example Upstash Ratelimit or Vercel's firewall) in front for real protection.
-- **No offline mode.** Pairing needs the server. An old offline service worker from earlier versions removes itself on the next visit.
+- **Offline pairing needs two scans and a camera on both devices.** There's no way around this without a server (see [Offline mode](#offline-mode)).
 - **Once connected, files arrive without a per-file prompt.** Accepting the connection means accepting files from that device.
 
 ## Code map
@@ -214,7 +257,10 @@ The app must be served over HTTPS (Vercel does this automatically).
 | `components/transferly-app.tsx` | UI and the pairing state machine (`loading → idle → requesting/connecting → connected → ended`). |
 | `components/icons.tsx` | Icon re-exports from Phosphor. |
 | `lib/pairing.ts` | Code generation, mailbox ids, PBKDF2 and AES-GCM, and the mailbox client. |
-| `lib/peer.ts` | `PeerLink`: the WebRTC connection, the two data channels, and the file send/receive protocol. |
+| `lib/peer.ts` | `PeerLink`: the WebRTC connection, the two data channels, and the file send/receive protocol. Also `loadIceServers()`. |
+| `lib/qr-signal.ts` | Packs a WebRTC description into a short QR string, and back. |
+| `components/qr.tsx` | QR code display and camera scanner (native `BarcodeDetector` or jsQR). |
+| `app/api/ice/route.ts` | Returns STUN servers plus TURN relay credentials, when configured. |
 | `app/api/signal/route.ts` | The `claim`, `send`, `poll` and `release` actions, with validation and rate limits. |
 | `lib/server/store.ts` | Mailbox storage: Upstash REST (`/multi-exec`) or an in-memory fallback. |
-| `public/sw.js` | Removes the old offline service worker. |
+| `public/sw.js` | Service worker that saves the app for offline use. |

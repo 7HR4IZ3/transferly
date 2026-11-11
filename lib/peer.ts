@@ -33,19 +33,34 @@ const HIGH_WATER = 4 * 1024 * 1024;
 const LOW_WATER = 1024 * 1024;
 const PROGRESS_INTERVAL = 100;
 
-function iceServers(): RTCIceServer[] {
-  const custom = process.env.NEXT_PUBLIC_ICE_SERVERS;
-  if (custom) {
-    try {
-      return JSON.parse(custom) as RTCIceServer[];
-    } catch {
-      console.warn("NEXT_PUBLIC_ICE_SERVERS is not valid JSON; using defaults.");
+const FALLBACK_ICE: RTCIceServer[] = [{ urls: ["stun:stun.cloudflare.com:3478", "stun:stun.l.google.com:19302"] }];
+let iceCache: { servers: RTCIceServer[]; at: number } | null = null;
+
+/**
+ * STUN + (if configured on the server) TURN relay servers. Cached for 10
+ * minutes. Returns no servers when offline, so local pairing doesn't wait
+ * on unreachable hosts.
+ */
+export async function loadIceServers(): Promise<RTCIceServer[]> {
+  if (typeof navigator !== "undefined" && !navigator.onLine) return [];
+  if (iceCache && Date.now() - iceCache.at < 10 * 60_000) return iceCache.servers;
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 4000);
+    const response = await fetch("/api/ice", { cache: "no-store", signal: controller.signal });
+    clearTimeout(timer);
+    const data = (await response.json()) as { iceServers?: RTCIceServer[] };
+    if (response.ok && Array.isArray(data.iceServers) && data.iceServers.length) {
+      iceCache = { servers: data.iceServers, at: Date.now() };
+      return data.iceServers;
     }
+  } catch {
+    // Fall through to public STUN.
   }
-  return [{ urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] }];
+  return FALLBACK_ICE;
 }
 
-function waitForIce(pc: RTCPeerConnection, timeoutMs = 3000) {
+function waitForIce(pc: RTCPeerConnection, timeoutMs = 5000) {
   if (pc.iceGatheringState === "complete") return Promise.resolve();
   return new Promise<void>((resolve) => {
     const done = () => {
@@ -75,8 +90,9 @@ export class PeerLink {
   constructor(
     readonly initiator: boolean,
     private handlers: Handlers,
+    iceServers: RTCIceServer[] = [],
   ) {
-    this.pc = new RTCPeerConnection({ iceServers: iceServers() });
+    this.pc = new RTCPeerConnection({ iceServers });
     // Initiator sends on 0 and receives on 1; the answerer mirrors that.
     const channelA = this.pc.createDataChannel("a", { negotiated: true, id: 0, ordered: true });
     const channelB = this.pc.createDataChannel("b", { negotiated: true, id: 1, ordered: true });
@@ -116,6 +132,12 @@ export class PeerLink {
 
   async acceptAnswer(sdp: string) {
     await this.pc.setRemoteDescription({ type: "answer", sdp });
+  }
+
+  /** Which kinds of route each side offered (host = LAN, srflx = public IP, relay = TURN). */
+  describeCandidates() {
+    const types = (sdp = "") => [...new Set([...sdp.matchAll(/ typ (\w+)/g)].map((match) => match[1]))].join(", ") || "none";
+    return "local: " + types(this.pc.localDescription?.sdp) + " · remote: " + types(this.pc.remoteDescription?.sdp);
   }
 
   get isOpen() {

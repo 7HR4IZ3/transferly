@@ -112,15 +112,20 @@ export class PairingError extends Error {
 
 async function call(body: Record<string, unknown>) {
   let response: Response;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 8000);
   try {
     response = await fetch("/api/signal", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
       cache: "no-store",
+      signal: controller.signal,
     });
   } catch {
     throw new PairingError("You appear to be offline.", 0);
+  } finally {
+    clearTimeout(timer);
   }
   const data = (await response.json().catch(() => ({}))) as { error?: string; messages?: string[] };
   if (!response.ok) throw new PairingError(data.error || "Pairing failed.", response.status);
