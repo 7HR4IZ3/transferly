@@ -185,6 +185,15 @@ async function turnServers(env: Env): Promise<RTCIceServer[]> {
   // Trim: pasted secrets often carry a stray space or newline.
   const keyId = (env.CLOUDFLARE_TURN_KEY_ID ?? "").trim();
   const token = (env.CLOUDFLARE_TURN_API_TOKEN ?? "").trim();
+  // A TURN key ID is 32 hex characters. Describe what's wrong without revealing values.
+  if (!/^[a-f0-9]{32}$/i.test(keyId)) {
+    const swapped = /^[a-f0-9]{32}$/i.test(token);
+    throw new TurnError(
+      swapped
+        ? "CLOUDFLARE_TURN_KEY_ID and CLOUDFLARE_TURN_API_TOKEN look swapped"
+        : `CLOUDFLARE_TURN_KEY_ID doesn't look like a TURN key ID (expected 32 hex characters, got ${keyId.length} characters)`,
+    );
+  }
   const base = `https://rtc.live.cloudflare.com/v1/turn/keys/${encodeURIComponent(keyId)}/credentials`;
   const init = {
     method: "POST",
@@ -200,7 +209,7 @@ async function turnServers(env: Env): Promise<RTCIceServer[]> {
       response.status === 401 || response.status === 403
         ? "Cloudflare rejected the TURN API token (use the token shown when creating the TURN key)"
         : response.status === 404
-          ? "Cloudflare doesn't know this TURN key ID"
+          ? "Cloudflare doesn't know this TURN key ID (check it's the Turn Token ID of an existing TURN key)"
           : "Cloudflare TURN returned an error";
     throw new TurnError(`${hint} (HTTP ${response.status}).`);
   }
