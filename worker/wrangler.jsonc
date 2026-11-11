@@ -11,7 +11,7 @@
     ]
   },
   // SQLite-backed Durable Objects are what the Workers free plan supports.
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Mailbox", "Budget"] }],
+  "migrations": [{ "tag": "transferly-signal-v1", "new_sqlite_classes": ["Mailbox", "Budget"] }],
   "vars": {
     // Set to your site's origin(s), e.g. "https://transferly-khaki.vercel.app", to stop other sites using this Worker.
     "ALLOWED_ORIGINS": "*",
