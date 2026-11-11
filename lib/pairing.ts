@@ -115,7 +115,14 @@ export class PairingError extends Error {
  * (see /worker), each device keeps one WebSocket open and messages arrive
  * instantly. Otherwise the app falls back to polling this site's /api/signal.
  */
-export const SIGNAL_URL = (process.env.NEXT_PUBLIC_SIGNAL_URL ?? "").replace(/\/$/, "");
+export const SIGNAL_URL = normalizeUrl(process.env.NEXT_PUBLIC_SIGNAL_URL ?? "");
+
+/** Accept "my-worker.workers.dev" as well as "https://my-worker.workers.dev/". */
+function normalizeUrl(value: string) {
+  const trimmed = value.trim().replace(/\/+$/, "");
+  if (!trimmed) return "";
+  return /^https?:\/\//i.test(trimmed) ? trimmed : "https://" + trimmed;
+}
 
 async function postJson(url: string, body: Record<string, unknown>) {
   let response: Response;

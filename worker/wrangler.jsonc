@@ -1,6 +1,7 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "transferly-signal",
+  // Must match the Worker's name in the Cloudflare dashboard if you deploy with Workers Builds (Git).
+  "name": "transferly",
   "main": "src/index.ts",
   "compatibility_date": "2025-09-01",
   "durable_objects": {

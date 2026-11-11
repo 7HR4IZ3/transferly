@@ -162,11 +162,16 @@ export function getStore(): SignalStore {
   if (globalStore.__transferlyStore) return globalStore.__transferlyStore;
 
   const { url, token } = redisCredentials();
-  if (!(url && token) && process.env.VERCEL) {
-    // Vercel runs many short-lived instances; an in-memory store loses
-    // mailboxes between requests and pairing hangs. Fail loudly instead.
+  const serverless =
+    Boolean(process.env.VERCEL) ||
+    // Cloudflare Workers (e.g. the site deployed with OpenNext) identify themselves like this.
+    (typeof navigator !== "undefined" && navigator.userAgent === "Cloudflare-Workers");
+  if (!(url && token) && serverless) {
+    // Serverless hosts run many short-lived instances that don't share memory, so an
+    // in-memory store loses codes between requests (codes "expire" every few
+    // seconds and "No device is using that code"). Fail loudly instead.
     throw new StoreNotConfiguredError(
-      "Pairing storage isn't set up on this deployment. Connect an Upstash Redis store in the Vercel project.",
+      "Pairing isn't set up on this deployment. Set NEXT_PUBLIC_SIGNAL_URL to the pairing Worker, or connect an Upstash Redis store.",
     );
   }
   globalStore.__transferlyStore = url && token ? new UpstashStore(url, token) : new MemoryStore();

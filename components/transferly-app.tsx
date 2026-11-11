@@ -338,8 +338,17 @@ export default function TransferlyApp() {
   const claimFailed = useCallback(
     (err: unknown) => {
       // No server reachable: switch to offline QR pairing instead of showing an error.
-      if (err instanceof PairingError && (err.status === 0 || err.status >= 500)) setOffline(true);
-      else setError(err instanceof Error ? err.message : "Couldn't get a code.");
+      if (err instanceof PairingError && (err.status === 0 || err.status >= 500)) {
+        setOffline(true);
+        // Online but the pairing server failed: say so, so a misconfiguration isn't mistaken for no internet.
+        if (navigator.onLine) {
+          setError(
+            err.status === 0
+              ? "Couldn't reach the pairing server, so you can only connect with QR codes right now."
+              : err.message,
+          );
+        }
+      } else setError(err instanceof Error ? err.message : "Couldn't get a code.");
       go("idle");
     },
     [go],

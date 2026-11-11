@@ -247,10 +247,14 @@ Everything here fits in free tiers:
 cd worker
 bun install
 bunx wrangler login                                  # free Cloudflare account
-bunx wrangler deploy                                 # prints https://transferly-signal.<you>.workers.dev
+bunx wrangler deploy                                 # prints https://transferly.<you>.workers.dev
 ```
 
-Then, in Vercel, set `NEXT_PUBLIC_SIGNAL_URL` to that URL and redeploy. It's read at build time.
+Or deploy from GitHub with **Cloudflare Workers Builds**: in the Worker's **Settings → Build**, set **Root directory** to `worker`. Without this, Cloudflare builds the Next.js site from the repo root instead of the pairing Worker. The Worker's name in the dashboard must match `name` in `worker/wrangler.jsonc` (`transferly`).
+
+Then, in Vercel, set `NEXT_PUBLIC_SIGNAL_URL` to the Worker's URL, including `https://`, and redeploy. It's read at build time.
+
+Check the Worker before pointing the site at it: `https://<worker>/` should return `{"ok":true}`. If it returns the Transferly page, the site got deployed there instead.
 
 Optionally, set `ALLOWED_ORIGINS` in `worker/wrangler.jsonc` to your site's origin (e.g. `https://transferly-khaki.vercel.app`) and deploy again, so other sites can't use your Worker.
 
