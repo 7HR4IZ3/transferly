@@ -136,11 +136,13 @@ export default function TransferlyApp() {
           linkRef.current = null;
           go("ended");
         } else {
-          console.warn("Transferly: connection failed. Candidates —", link.describeCandidates());
+          const routes = link.describeCandidates();
+          console.warn("Transferly: connection failed —", routes);
           backToIdle(
-            qrStepRef.current
+            (qrStepRef.current
               ? "Couldn't connect. Make sure both devices are on the same Wi-Fi or hotspot, then try again."
-              : "Couldn't connect the two devices. Their networks may be blocking direct connections. Try the same Wi-Fi.",
+              : "Couldn't connect the two devices. Their networks are blocking a direct connection.") +
+              " (Routes: " + routes + ".)",
           );
         }
       }

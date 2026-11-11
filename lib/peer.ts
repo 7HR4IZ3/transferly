@@ -134,10 +134,14 @@ export class PeerLink {
     await this.pc.setRemoteDescription({ type: "answer", sdp });
   }
 
-  /** Which kinds of route each side offered (host = LAN, srflx = public IP, relay = TURN). */
+  /** Which kinds of route each side offered, in plain words, for error messages. */
   describeCandidates() {
-    const types = (sdp = "") => [...new Set([...sdp.matchAll(/ typ (\w+)/g)].map((match) => match[1]))].join(", ") || "none";
-    return "local: " + types(this.pc.localDescription?.sdp) + " · remote: " + types(this.pc.remoteDescription?.sdp);
+    const names: Record<string, string> = { host: "local network", srflx: "internet", prflx: "internet", relay: "relay" };
+    const kinds = (sdp = "") => {
+      const found = [...new Set([...sdp.matchAll(/ typ (\w+)/g)].map((match) => names[match[1]] ?? match[1]))];
+      return found.join(" + ") || "none";
+    };
+    return "this device offered " + kinds(this.pc.localDescription?.sdp) + "; the other offered " + kinds(this.pc.remoteDescription?.sdp);
   }
 
   get isOpen() {
