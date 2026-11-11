@@ -1,5 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { getStore } from "../../../lib/server/store";
+import { getStore, StoreNotConfiguredError, type SignalStore } from "../../../lib/server/store";
 
 export const runtime = "nodejs";
 
@@ -43,7 +43,13 @@ export async function POST(request: NextRequest) {
   if (typeof id !== "string" || !ID_PATTERN.test(id)) return reply(400, { error: "Invalid id." });
   if (limited(request, action as keyof typeof LIMITS)) return reply(429, { error: "Too many requests. Wait a moment." });
 
-  const store = getStore();
+  let store: SignalStore;
+  try {
+    store = getStore();
+  } catch (error) {
+    console.error(error);
+    return reply(503, { error: error instanceof StoreNotConfiguredError ? error.message : "Pairing service unavailable." });
+  }
   const needsSecret = action !== "send";
   if (needsSecret && (typeof secret !== "string" || !SECRET_PATTERN.test(secret))) {
     return reply(400, { error: "Invalid secret." });
@@ -66,7 +72,8 @@ export async function POST(request: NextRequest) {
         await store.release(id, secret as string);
         return reply(200, { ok: true });
     }
-  } catch {
+  } catch (error) {
+    console.error("Signal store error:", error);
     return reply(503, { error: "Pairing service unavailable." });
   }
 

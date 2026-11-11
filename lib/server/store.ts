@@ -129,11 +129,20 @@ class UpstashStore implements SignalStore {
 
 const globalStore = globalThis as typeof globalThis & { __transferlyStore?: SignalStore };
 
+export class StoreNotConfiguredError extends Error {}
+
 export function getStore(): SignalStore {
   if (globalStore.__transferlyStore) return globalStore.__transferlyStore;
 
   const url = process.env.UPSTASH_REDIS_REST_URL ?? process.env.KV_REST_API_URL;
   const token = process.env.UPSTASH_REDIS_REST_TOKEN ?? process.env.KV_REST_API_TOKEN;
+  if (!(url && token) && process.env.VERCEL) {
+    // Vercel runs many short-lived instances; an in-memory store loses
+    // mailboxes between requests and pairing hangs. Fail loudly instead.
+    throw new StoreNotConfiguredError(
+      "Pairing storage isn't set up on this deployment. Connect an Upstash Redis store in the Vercel project.",
+    );
+  }
   globalStore.__transferlyStore = url && token ? new UpstashStore(url, token) : new MemoryStore();
   return globalStore.__transferlyStore;
 }
