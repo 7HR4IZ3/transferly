@@ -179,25 +179,45 @@ function originAllowed(request: Request, env: Env) {
 const relayLimitBytes = (env: Env) => Number(env.RELAY_MONTHLY_GB ?? "900") * 1e9;
 const relayMaxFileBytes = (env: Env) => Number(env.RELAY_MAX_FILE_MB ?? "1024") * 1024 * 1024;
 
+class TurnError extends Error {}
+
 async function turnServers(env: Env): Promise<RTCIceServer[]> {
-  const response = await fetch(
-    `https://rtc.live.cloudflare.com/v1/turn/keys/${env.CLOUDFLARE_TURN_KEY_ID}/credentials/generate-ice-servers`,
-    {
-      method: "POST",
-      headers: { Authorization: "Bearer " + env.CLOUDFLARE_TURN_API_TOKEN, "Content-Type": "application/json" },
-      body: JSON.stringify({ ttl: TURN_TTL_SECONDS }),
-    },
-  );
-  if (!response.ok) throw new Error("TURN credentials failed: " + response.status);
+  // Trim: pasted secrets often carry a stray space or newline.
+  const keyId = (env.CLOUDFLARE_TURN_KEY_ID ?? "").trim();
+  const token = (env.CLOUDFLARE_TURN_API_TOKEN ?? "").trim();
+  const base = `https://rtc.live.cloudflare.com/v1/turn/keys/${encodeURIComponent(keyId)}/credentials`;
+  const init = {
+    method: "POST",
+    headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
+    body: JSON.stringify({ ttl: TURN_TTL_SECONDS }),
+  };
+
+  // Current endpoint first; the older "generate" endpoint as a fallback.
+  let response = await fetch(base + "/generate-ice-servers", init);
+  if (response.status === 404) response = await fetch(base + "/generate", init);
+  if (!response.ok) {
+    const hint =
+      response.status === 401 || response.status === 403
+        ? "Cloudflare rejected the TURN API token (use the token shown when creating the TURN key)"
+        : response.status === 404
+          ? "Cloudflare doesn't know this TURN key ID"
+          : "Cloudflare TURN returned an error";
+    throw new TurnError(`${hint} (HTTP ${response.status}).`);
+  }
+
   const data = (await response.json()) as { iceServers?: RTCIceServer | RTCIceServer[] };
   const list = Array.isArray(data.iceServers) ? data.iceServers : data.iceServers ? [data.iceServers] : [];
   // Browsers block port 53, so drop those URLs (Cloudflare's own recommendation).
-  return list
+  const servers = list
     .map((server) => ({
       ...server,
       urls: (Array.isArray(server.urls) ? server.urls : [server.urls]).filter((url: string) => !/:53(\?|$)/.test(url)),
     }))
     .filter((server) => server.urls.length > 0);
+  if (!servers.some((server) => server.urls.some((url: string) => url.startsWith("turn")))) {
+    throw new TurnError("Cloudflare returned no TURN servers.");
+  }
+  return servers;
 }
 
 export default {
@@ -253,7 +273,8 @@ export default {
         return json(200, { ...base, iceServers: [...STUN, ...(await turnServers(env))], relay: true });
       } catch (error) {
         console.error(error);
-        return json(200, { ...base, reason: "error" });
+        // The detail is safe to show (no secrets) and makes misconfiguration obvious.
+        return json(200, { ...base, reason: "error", detail: error instanceof TurnError ? error.message : "Couldn't create relay credentials." });
       }
     }
 

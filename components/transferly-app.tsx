@@ -64,6 +64,7 @@ export default function TransferlyApp() {
   const requestRef = useRef<string | null>(null);
   const qrStepRef = useRef<QrStep | null>(null);
   const relayUnavailableRef = useRef<string | undefined>(undefined);
+  const relayDetailRef = useRef<string | undefined>(undefined);
   const inputRef = useRef("");
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -148,7 +149,11 @@ export default function TransferlyApp() {
               ? "Couldn't connect. Make sure both devices are on the same Wi-Fi or hotspot, then try again."
               : relayUnavailableRef.current === "budget"
                 ? "Couldn't connect the two devices directly, and this month's free relay allowance is used up. Try the same Wi-Fi."
-                : "Couldn't connect the two devices. Their networks are blocking a direct connection.") +
+                : relayUnavailableRef.current === "error"
+                  ? "Couldn't connect the two devices directly, and the relay isn't working: " +
+                    (relayDetailRef.current ?? "unknown error") +
+                    "."
+                  : "Couldn't connect the two devices. Their networks are blocking a direct connection.") +
               " (Routes: " + routes + ".)",
           );
         }
@@ -164,6 +169,7 @@ export default function TransferlyApp() {
       linkRef.current = null;
       previous?.close();
       relayUnavailableRef.current = ice.relayUnavailable;
+      relayDetailRef.current = ice.relayDetail;
       setRoute(null);
       setRelayMaxBytes(ice.relayMaxBytes);
       const link: PeerLink = new PeerLink(

@@ -42,8 +42,10 @@ export type IceConfig = {
   servers: RTCIceServer[];
   /** Largest file allowed when the connection goes through the relay. */
   relayMaxBytes: number;
-  /** Set when the relay was not offered: "budget", "not-configured", … */
+  /** Set when the relay was not offered: "budget", "not-configured", "error", … */
   relayUnavailable?: string;
+  /** Human-readable reason when the relay failed (e.g. a rejected TURN key). */
+  relayDetail?: string;
 };
 
 const DEFAULT_CHUNK = 64 * 1024;
@@ -77,12 +79,13 @@ export async function loadIceConfig(auth?: { id: string; secret: string }): Prom
         })
       : await fetch("/api/ice", { cache: "no-store", signal: controller.signal });
     clearTimeout(timer);
-    const data = (await response.json()) as { iceServers?: RTCIceServer[]; relayMaxBytes?: number; reason?: string };
+    const data = (await response.json()) as { iceServers?: RTCIceServer[]; relayMaxBytes?: number; reason?: string; detail?: string };
     if (response.ok && Array.isArray(data.iceServers) && data.iceServers.length) {
       return {
         servers: data.iceServers,
         relayMaxBytes: typeof data.relayMaxBytes === "number" ? data.relayMaxBytes : DEFAULT_RELAY_MAX_BYTES,
         relayUnavailable: data.reason,
+        relayDetail: data.detail,
       };
     }
   } catch {
