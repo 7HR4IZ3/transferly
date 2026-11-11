@@ -191,7 +191,7 @@ To try it on one machine, open the app in two isolated sessions, for example a n
 
 | Variable | Purpose |
 | --- | --- |
-| `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN` (or Vercel KV's `KV_REST_API_URL`, `KV_REST_API_TOKEN`) | Shared mailbox storage. **Required on serverless hosts such as Vercel**, where requests from the two devices can land on different instances. Without these variables an in-memory store is used, which works only with a single server process. |
+| `UPSTASH_REDIS_REST_URL` + `UPSTASH_REDIS_REST_TOKEN`, or `KV_REST_API_URL` + `KV_REST_API_TOKEN`, or any prefixed variant ending in `KV_REST_API_URL` / `KV_REST_API_TOKEN` (for example `UPSTASH_REDIS_REST_KV_REST_API_URL`) | Shared mailbox storage. **Required on serverless hosts such as Vercel**, where requests from the two devices can land on different instances. Without these variables an in-memory store is used, which works only with a single server process. |
 | `NEXT_PUBLIC_ICE_SERVERS` | Optional JSON array of `RTCIceServer` objects, e.g. `[{"urls":"stun:stun.l.google.com:19302"},{"urls":"turn:turn.example.com:3478","username":"u","credential":"p"}]`. Replaces the default Google STUN servers. It's read at build time. |
 
 The app must be served over HTTPS (Vercel does this automatically).

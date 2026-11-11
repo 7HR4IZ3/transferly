@@ -111,13 +111,14 @@ class UpstashStore implements SignalStore {
   }
 
   async drain(id: string, secret: string) {
-    const [stored, messages] = await this.pipeline([
-      ["GET", "tl:box:" + id],
+    // Check the secret first so nobody else can read or wipe this mailbox.
+    const [stored] = await this.pipeline([["GET", "tl:box:" + id]]);
+    if (stored !== secret) return null;
+    const [messages] = await this.pipeline([
       ["LRANGE", "tl:msg:" + id, 0, -1],
       ["DEL", "tl:msg:" + id],
       ["EXPIRE", "tl:box:" + id, MAILBOX_TTL_SECONDS],
     ]);
-    if (stored !== secret) return null;
     return Array.isArray(messages) ? messages.map(String) : [];
   }
 
@@ -129,13 +130,33 @@ class UpstashStore implements SignalStore {
 
 const globalStore = globalThis as typeof globalThis & { __transferlyStore?: SignalStore };
 
+/**
+ * Find Upstash REST credentials. Vercel's Marketplace can add a custom prefix
+ * to the variable names (e.g. UPSTASH_REDIS_REST_KV_REST_API_URL), so accept
+ * the common names plus any variable ending in KV_REST_API_URL / _TOKEN.
+ * Read-only tokens are skipped because the store needs to write.
+ */
+function redisCredentials() {
+  const env = process.env;
+  const pick = (exact: string[], suffix: string) => {
+    for (const name of exact) if (env[name]) return env[name];
+    const match = Object.keys(env)
+      .filter((name) => name.endsWith(suffix) && !name.includes("READ_ONLY") && env[name])
+      .sort()[0];
+    return match ? env[match] : undefined;
+  };
+  return {
+    url: pick(["UPSTASH_REDIS_REST_URL", "KV_REST_API_URL"], "KV_REST_API_URL"),
+    token: pick(["UPSTASH_REDIS_REST_TOKEN", "KV_REST_API_TOKEN"], "KV_REST_API_TOKEN"),
+  };
+}
+
 export class StoreNotConfiguredError extends Error {}
 
 export function getStore(): SignalStore {
   if (globalStore.__transferlyStore) return globalStore.__transferlyStore;
 
-  const url = process.env.UPSTASH_REDIS_REST_URL ?? process.env.KV_REST_API_URL;
-  const token = process.env.UPSTASH_REDIS_REST_TOKEN ?? process.env.KV_REST_API_TOKEN;
+  const { url, token } = redisCredentials();
   if (!(url && token) && process.env.VERCEL) {
     // Vercel runs many short-lived instances; an in-memory store loses
     // mailboxes between requests and pairing hangs. Fail loudly instead.
