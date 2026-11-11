@@ -1,20 +1,23 @@
 # Transferly
 
-Send files directly between two browsers. One person reads out their 6-digit code, the other types it in, and the two browsers connect peer-to-peer automatically. No accounts, no links, no copy-pasting long tokens.
+Send files directly between two browsers. One person reads out their 6-digit code, the other types it in, the code's owner taps **Accept**, and the two browsers connect peer-to-peer. No accounts, no links, no copy-pasting long tokens.
 
 ## How it works
 
 1. Each browser reserves a random 6-digit code on the server (`/api/signal`) and shows it.
-2. Person B types A's code. B's browser sends an encrypted WebRTC offer to A's mailbox,
-   with B's own code inside it.
-3. A's browser picks up the offer, learns B's code from it, and sends its answer back to B.
-   Nobody on A's side has to do anything.
-4. The browsers open a direct WebRTC connection, and either side can drop files.
-   Both codes are freed as soon as the devices connect.
+2. Person B types A's code. B's browser sends an encrypted connection request, carrying B's
+   own code, to A's mailbox.
+3. A sees "**482 913 wants to connect**" with **Accept** / **Decline**. A can check that code
+   against the one on B's screen.
+4. On Accept, B's browser creates a fresh WebRTC offer, A's browser answers, and the devices
+   connect directly. Either side can then drop files. Both codes are freed once connected.
 
-If both people happen to type each other's code at once, the device with the lower code keeps its offer and the other one answers.
+More details:
 
-Anyone who enters your code while it's showing will connect to you. Codes are single-use, expire after 10 minutes, and the API is rate-limited to make guessing impractical. The connected screen shows the other device's code so you can check it's who you expect.
+- If both people type each other's code, that counts as consent on both sides, so they connect without a prompt. The device with the lower code makes the offer.
+- Decline tells the requester straight away. The requester can cancel while waiting.
+- Unanswered requests expire after 2 minutes. A device busy with one request automatically declines others.
+- The WebRTC offer is created only after Accept, so network details aren't stale however long the owner takes to answer.
 
 ### What the server sees
 

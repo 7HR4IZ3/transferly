@@ -5,10 +5,12 @@ import { ArrowDown, ArrowUp, Check, Copy, Download, Lock, Plus, XIcon } from "./
 import { Mailbox, PairingError, formatCode, isValidCode, randomToken, type SignalMessage } from "../lib/pairing";
 import { PeerLink, type LinkState, type Transfer } from "../lib/peer";
 
-type Phase = "loading" | "idle" | "connecting" | "connected" | "ended";
+// requesting: we typed a code and are waiting for its owner to accept.
+type Phase = "loading" | "idle" | "requesting" | "connecting" | "connected" | "ended";
 
 const POLL_MS = 1200;
 const CONNECT_TIMEOUT_MS = 30_000;
+const REQUEST_TIMEOUT_MS = 120_000;
 
 function formatBytes(bytes: number) {
   if (bytes < 1024) return bytes + " B";
@@ -28,6 +30,7 @@ export default function TransferlyApp() {
   const [input, setInput] = useState("");
   const [peerCode, setPeerCode] = useState("");
   const [error, setError] = useState("");
+  const [request, setRequestState] = useState<string | null>(null);
   const [transfers, setTransfers] = useState<Transfer[]>([]);
   const [copied, setCopied] = useState(false);
   const [dragging, setDragging] = useState(false);
@@ -37,12 +40,19 @@ export default function TransferlyApp() {
   const phaseRef = useRef<Phase>("loading");
   const targetRef = useRef("");
   const sidRef = useRef("");
+  const requestRef = useRef<string | null>(null);
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const go = useCallback((next: Phase) => {
     phaseRef.current = next;
     setPhase(next);
+  }, []);
+
+  /** Incoming connection request awaiting Accept / Decline. */
+  const setRequest = useCallback((code: string | null) => {
+    requestRef.current = code;
+    setRequestState(code);
   }, []);
 
   const upsertTransfer = useCallback((transfer: Transfer) => {
@@ -69,6 +79,16 @@ export default function TransferlyApp() {
       go("idle");
     },
     [go],
+  );
+
+  const armTimeout = useCallback(
+    (ms: number, message: string) => {
+      clearTimeout(timeoutRef.current);
+      timeoutRef.current = setTimeout(() => {
+        if (!linkRef.current?.isOpen) backToIdle(message);
+      }, ms);
+    },
+    [backToIdle],
   );
 
   const handleLinkState = useCallback(
@@ -105,15 +125,10 @@ export default function TransferlyApp() {
         onTransfer: upsertTransfer,
       });
       linkRef.current = link;
-      clearTimeout(timeoutRef.current);
-      timeoutRef.current = setTimeout(() => {
-        if (linkRef.current === link && !link.isOpen) {
-          backToIdle("The connection timed out. Make sure both devices are online and try again.");
-        }
-      }, CONNECT_TIMEOUT_MS);
+      armTimeout(CONNECT_TIMEOUT_MS, "The connection timed out. Make sure both devices are online and try again.");
       return link;
     },
-    [backToIdle, handleLinkState, upsertTransfer],
+    [armTimeout, handleLinkState, upsertTransfer],
   );
 
   const sendOffer = useCallback(
@@ -158,34 +173,98 @@ export default function TransferlyApp() {
       const me = mailboxRef.current?.code;
       const phaseNow = phaseRef.current;
       if (!me || phaseNow === "connected" || phaseNow === "ended") return;
-      const fromTarget = message.from === targetRef.current;
-
+      const from = message.from;
+      const fromTarget = from === targetRef.current;
       const link = linkRef.current;
 
-      if (message.kind === "offer") {
-        // Someone typed our code: connect to them automatically. The offer
-        // carries their code so our answer can go straight back to them.
-        if (link && !link.initiator) return; // already answering someone
-        if (link?.initiator) {
-          // We're dialing someone else, or we both typed each other's code at
-          // once. In the second case the lower code keeps its own offer.
-          if (!fromTarget || me < message.from) return;
-        }
-        targetRef.current = message.from;
-        setPeerCode(message.from);
-        setError("");
-        await answerOffer(message);
-      } else if (message.kind === "answer") {
-        if (!fromTarget || !link?.initiator || message.sid !== sidRef.current) return;
-        try {
-          await link.acceptAnswer(message.sdp);
-        } catch {
-          backToIdle("The other device sent an invalid reply. Try again.");
-        }
+      switch (message.kind) {
+        case "request":
+          if (phaseNow === "requesting" && fromTarget) {
+            // We both typed each other's code: that's consent on both sides.
+            // The lower code makes the offer; the other waits for it.
+            if (me < from) await sendOffer(from);
+            return;
+          }
+          if (phaseNow !== "idle" || (requestRef.current && requestRef.current !== from)) {
+            // Busy with someone else.
+            void Mailbox.send(from, { kind: "decline", from: me }).catch(() => undefined);
+            return;
+          }
+          setRequest(from);
+          return;
+
+        case "cancel":
+          if (requestRef.current === from) setRequest(null);
+          else if (fromTarget) backToIdle("The other device cancelled.");
+          return;
+
+        case "decline":
+          if (fromTarget && phaseNow === "requesting") backToIdle(formatCode(from) + " declined your request.");
+          return;
+
+        case "accept":
+          if (fromTarget && phaseNow === "requesting") await sendOffer(from);
+          return;
+
+        case "offer":
+          // Only from a device we accepted, or one we asked to connect to.
+          if (!fromTarget) return;
+          if (link && !link.initiator) return; // already answering
+          if (link?.initiator && me < from) return; // both offered: lower code keeps its own
+          await answerOffer(message);
+          return;
+
+        case "answer":
+          if (!fromTarget || !link?.initiator || message.sid !== sidRef.current) return;
+          try {
+            await link.acceptAnswer(message.sdp);
+          } catch {
+            backToIdle("The other device sent an invalid reply. Try again.");
+          }
+          return;
       }
     },
-    [answerOffer, backToIdle],
+    [answerOffer, backToIdle, sendOffer, setRequest],
   );
+
+  const acceptRequest = useCallback(async () => {
+    const me = mailboxRef.current?.code;
+    const from = requestRef.current;
+    if (!me || !from) return;
+    setRequest(null);
+    setError("");
+    targetRef.current = from;
+    setPeerCode(from);
+    go("connecting");
+    armTimeout(CONNECT_TIMEOUT_MS, "The other device didn't finish connecting. Try again.");
+    try {
+      await Mailbox.send(from, { kind: "accept", from: me });
+    } catch {
+      if (targetRef.current === from) backToIdle("That device is no longer available.");
+    }
+  }, [armTimeout, backToIdle, go, setRequest]);
+
+  const declineRequest = useCallback(() => {
+    const me = mailboxRef.current?.code;
+    const from = requestRef.current;
+    setRequest(null);
+    if (me && from) void Mailbox.send(from, { kind: "decline", from: me }).catch(() => undefined);
+  }, [setRequest]);
+
+  /** Stop an outgoing request or a half-open connection. */
+  const cancelPairing = useCallback(() => {
+    const me = mailboxRef.current?.code;
+    const to = targetRef.current;
+    if (me && to) void Mailbox.send(to, { kind: "cancel", from: me }).catch(() => undefined);
+    backToIdle();
+  }, [backToIdle]);
+
+  // A request nobody answers disappears on its own.
+  useEffect(() => {
+    if (!request) return;
+    const timer = setTimeout(() => requestRef.current === request && setRequest(null), REQUEST_TIMEOUT_MS);
+    return () => clearTimeout(timer);
+  }, [request, setRequest]);
 
   const adoptMailbox = useCallback(
     (mailbox: Mailbox) => {
@@ -279,12 +358,23 @@ export default function TransferlyApp() {
         setError("That's your own code. Enter the code shown on the other device.");
         return;
       }
+      if (requestRef.current === code) {
+        // They already asked to connect to us; typing their code means yes.
+        await acceptRequest();
+        return;
+      }
       setError("");
       targetRef.current = code;
       setPeerCode(code);
-      await sendOffer(code);
+      go("requesting");
+      armTimeout(REQUEST_TIMEOUT_MS, "No answer from " + formatCode(code) + ". Try again.");
+      try {
+        await Mailbox.send(code, { kind: "request", from: me });
+      } catch (err) {
+        if (targetRef.current === code) backToIdle(err instanceof Error ? err.message : "Couldn't reach that code.");
+      }
     },
-    [sendOffer],
+    [acceptRequest, armTimeout, backToIdle, go],
   );
 
   const handleInput = (event: ChangeEvent<HTMLInputElement>) => {
@@ -338,7 +428,25 @@ export default function TransferlyApp() {
       </header>
 
       <section className="card" aria-live="polite">
-        {!paired ? (
+        {!paired && request && phase === "idle" ? (
+          <div className="request">
+            <span className="request-icon">
+              <ArrowDown size={20} />
+            </span>
+            <p className="request-title">
+              <span className="request-code">{formatCode(request)}</span> wants to connect
+            </p>
+            <p className="muted small">Only accept if you recognise this code from the other device.</p>
+            <div className="request-actions">
+              <button className="ghost-button" onClick={declineRequest} type="button">
+                Decline
+              </button>
+              <button className="primary-button" onClick={() => void acceptRequest()} type="button">
+                Accept
+              </button>
+            </div>
+          </div>
+        ) : !paired ? (
           <>
             <div className="block">
               <p className="label">Share your code</p>
@@ -385,7 +493,7 @@ export default function TransferlyApp() {
                 </div>
               </div>
 
-              <Status phase={phase} peerCode={peerCode} error={error} onCancel={() => backToIdle()} />
+              <Status phase={phase} peerCode={peerCode} error={error} onCancel={cancelPairing} />
             </div>
           </>
         ) : (
@@ -469,6 +577,16 @@ function Status({
   onCancel: () => void;
 }) {
   if (error) return <p className="status status-error">{error}</p>;
+  if (phase === "requesting") {
+    return (
+      <p className="status">
+        <span className="spinner" /> Waiting for {formatCode(peerCode)} to accept
+        <button className="link-button" onClick={onCancel} type="button">
+          Cancel
+        </button>
+      </p>
+    );
+  }
   if (phase === "connecting") {
     return (
       <p className="status">
@@ -479,7 +597,7 @@ function Status({
       </p>
     );
   }
-  return <p className="status muted">Only one of you needs to type a code. You&apos;ll connect automatically.</p>;
+  return <p className="status muted">Only one of you needs to type a code. The other just taps Accept.</p>;
 }
 
 function TransferRow({ item }: { item: Transfer }) {

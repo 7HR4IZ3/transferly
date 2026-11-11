@@ -8,6 +8,8 @@
  */
 
 export type SignalMessage =
+  // request: "can I connect?" · accept / decline: the code owner's reply · cancel: requester gave up
+  | { kind: "request" | "accept" | "decline" | "cancel"; from: string }
   | { kind: "offer"; from: string; sid: string; sdp: string }
   | { kind: "answer"; from: string; sid: string; sdp: string };
 
@@ -88,7 +90,9 @@ async function open(code: string, sealed: string): Promise<SignalMessage | null>
     const plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv: packed.slice(0, 12) }, await codeKey(code), packed.slice(12));
     const message = JSON.parse(decoder.decode(plain)) as SignalMessage;
     if (!isValidCode(message.from)) return null;
-    if ((message.kind !== "offer" && message.kind !== "answer") || typeof message.sdp !== "string" || typeof message.sid !== "string") {
+    if (message.kind === "offer" || message.kind === "answer") {
+      if (typeof message.sdp !== "string" || typeof message.sid !== "string") return null;
+    } else if (!["request", "accept", "decline", "cancel"].includes(message.kind)) {
       return null;
     }
     return message;
