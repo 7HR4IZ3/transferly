@@ -10,6 +10,6 @@ export default defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
-    "public/qr-scanner-worker.min.js",
+    "worker/**",
   ]),
 ]);

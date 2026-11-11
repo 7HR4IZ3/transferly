@@ -3,14 +3,13 @@
 import { useCallback, useEffect, useRef, useState, type ChangeEvent, type DragEvent } from "react";
 import { ArrowDown, ArrowUp, Check, Copy, Download, Lock, Plus, QrIcon, XIcon } from "./icons";
 import { QrCode, QrScanner } from "./qr";
-import { Mailbox, PairingError, formatCode, isValidCode, randomToken, type SignalMessage } from "../lib/pairing";
-import { PeerLink, loadIceServers, type LinkState, type Transfer } from "../lib/peer";
+import { Mailbox, PairingError, formatCode, isValidCode, randomToken, reportRelayUsage, type SignalMessage } from "../lib/pairing";
+import { PeerLink, loadIceConfig, type IceConfig, type LinkState, type Route, type Transfer } from "../lib/peer";
 import { packSignal, unpackSignal } from "../lib/qr-signal";
 
 // requesting: we typed a code and are waiting for its owner to accept.
 type Phase = "loading" | "idle" | "requesting" | "connecting" | "connected" | "ended";
 
-const POLL_MS = 1200;
 const CONNECT_TIMEOUT_MS = 30_000;
 const REQUEST_TIMEOUT_MS = 120_000;
 const QR_CONNECT_TIMEOUT_MS = 45_000;
@@ -49,6 +48,8 @@ export default function TransferlyApp() {
   const [qrStep, setQrStepState] = useState<QrStep | null>(null);
   const [qrText, setQrText] = useState("");
   const [scanBusy, setScanBusy] = useState(false);
+  const [route, setRoute] = useState<Route | null>(null);
+  const [relayMaxBytes, setRelayMaxBytes] = useState(0);
   const [transfers, setTransfers] = useState<Transfer[]>([]);
   const [copied, setCopied] = useState(false);
   const [dragging, setDragging] = useState(false);
@@ -60,6 +61,7 @@ export default function TransferlyApp() {
   const sidRef = useRef("");
   const requestRef = useRef<string | null>(null);
   const qrStepRef = useRef<QrStep | null>(null);
+  const relayUnavailableRef = useRef<string | undefined>(undefined);
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -141,7 +143,9 @@ export default function TransferlyApp() {
           backToIdle(
             (qrStepRef.current
               ? "Couldn't connect. Make sure both devices are on the same Wi-Fi or hotspot, then try again."
-              : "Couldn't connect the two devices. Their networks are blocking a direct connection.") +
+              : relayUnavailableRef.current === "budget"
+                ? "Couldn't connect the two devices directly, and this month's free relay allowance is used up. Try the same Wi-Fi."
+                : "Couldn't connect the two devices. Their networks are blocking a direct connection.") +
               " (Routes: " + routes + ".)",
           );
         }
@@ -151,15 +155,23 @@ export default function TransferlyApp() {
   );
 
   const newLink = useCallback(
-    (initiator: boolean, iceServers: RTCIceServer[], timeoutMs: number | null = CONNECT_TIMEOUT_MS) => {
+    (initiator: boolean, ice: IceConfig, timeoutMs: number | null = CONNECT_TIMEOUT_MS) => {
       // Detach before closing so the old link's "closed" event is ignored.
       const previous = linkRef.current;
       linkRef.current = null;
       previous?.close();
+      relayUnavailableRef.current = ice.relayUnavailable;
+      setRoute(null);
+      setRelayMaxBytes(ice.relayMaxBytes);
       const link: PeerLink = new PeerLink(
         initiator,
-        { onState: (state) => handleLinkState(link, state), onTransfer: upsertTransfer },
-        iceServers,
+        {
+          onState: (state) => handleLinkState(link, state),
+          onTransfer: upsertTransfer,
+          onRoute: (next) => linkRef.current === link && setRoute(next),
+          onRelayUsage: reportRelayUsage,
+        },
+        ice,
       );
       linkRef.current = link;
       if (timeoutMs === null) clearTimeout(timeoutRef.current);
@@ -176,9 +188,9 @@ export default function TransferlyApp() {
       go("connecting");
       const sid = randomToken(8);
       sidRef.current = sid;
-      const servers = await loadIceServers();
+      const ice = await loadIceConfig(mailboxRef.current?.auth);
       if (phaseRef.current !== "connecting" || targetRef.current !== to) return; // cancelled meanwhile
-      const link = newLink(true, servers);
+      const link = newLink(true, ice);
       try {
         const sdp = await link.createOffer();
         if (linkRef.current !== link) return;
@@ -196,9 +208,9 @@ export default function TransferlyApp() {
       if (!from) return;
       go("connecting");
       sidRef.current = message.sid;
-      const servers = await loadIceServers();
+      const ice = await loadIceConfig(mailboxRef.current?.auth);
       if (phaseRef.current !== "connecting" || targetRef.current !== message.from) return;
-      const link = newLink(false, servers);
+      const link = newLink(false, ice);
       try {
         const sdp = await link.acceptOffer(message.sdp);
         if (linkRef.current !== link) return;
@@ -390,7 +402,7 @@ export default function TransferlyApp() {
   const startQrHost = useCallback(async () => {
     setError("");
     setQrStep("preparing");
-    const servers = await loadIceServers();
+    const ice = await loadIceConfig();
     // Camera permission lets browsers reveal real LAN addresses (instead of
     // hidden .local names), which offline pairing relies on. It's needed to
     // scan the reply anyway.
@@ -399,7 +411,7 @@ export default function TransferlyApp() {
       if (qrStepRef.current !== "preparing") return;
       const sid = randomToken(3);
       sidRef.current = sid;
-      const link = newLink(true, servers, null); // no timeout while the guest scans
+      const link = newLink(true, ice, null); // no timeout while the guest scans
       const sdp = await link.createOffer();
       if (linkRef.current !== link || qrStepRef.current !== "preparing") return;
       setQrText(packSignal("offer", sid, sdp));
@@ -429,10 +441,10 @@ export default function TransferlyApp() {
         }
         setError("");
         setScanBusy(true);
-        const servers = await loadIceServers();
+        const ice = await loadIceConfig();
         if (qrStepRef.current !== "scan-offer") return;
         // The scanner (and camera) stays on until the answer exists; see startQrHost.
-        const link = newLink(false, servers, null);
+        const link = newLink(false, ice, null);
         try {
           const sdp = await link.acceptOffer(signal.sdp);
           if (linkRef.current !== link) return;
@@ -467,34 +479,24 @@ export default function TransferlyApp() {
     [armTimeout, backToIdle, newLink, setQrStep],
   );
 
-  // Poll our mailbox for offers and answers until we're connected.
+  // Receive offers and answers for our code until we're connected (WebSocket or polling).
   useEffect(() => {
-    if (!myCode) return;
-    let stopped = false;
-    let timer: ReturnType<typeof setTimeout>;
-
-    const tick = async () => {
-      const mailbox = mailboxRef.current;
-      if (stopped || !mailbox || mailbox.code !== myCode) return;
-      try {
-        const messages = await mailbox.poll();
-        for (const message of messages) if (!stopped) await handleSignal(message);
-      } catch (err) {
-        if (err instanceof PairingError && err.status === 410 && !stopped && phaseRef.current !== "connected") {
-          stopped = true;
-          backToIdle("Your code expired, so here is a new one.");
-          claimCode();
-          return;
-        }
-      }
-      if (!stopped) timer = setTimeout(tick, document.hidden ? POLL_MS * 3 : POLL_MS);
-    };
-    void tick();
-
-    return () => {
-      stopped = true;
-      clearTimeout(timer);
-    };
+    const mailbox = mailboxRef.current;
+    if (!myCode || !mailbox || mailbox.code !== myCode) return;
+    let chain = Promise.resolve();
+    mailbox.start({
+      // One at a time, in arrival order (e.g. a request is handled before a later cancel).
+      onMessage: (message) => {
+        chain = chain.then(() => handleSignal(message)).catch(() => undefined);
+      },
+      onLost: () => {
+        if (mailboxRef.current !== mailbox || phaseRef.current === "connected" || phaseRef.current === "ended") return;
+        mailboxRef.current = null;
+        backToIdle("Your code expired, so here is a new one.");
+        claimCode();
+      },
+    });
+    return () => mailbox.stop();
   }, [backToIdle, claimCode, handleSignal, myCode]);
 
   // Focus the code field once it's usable (desktop only, so phones don't pop a keyboard).
@@ -755,7 +757,12 @@ export default function TransferlyApp() {
                   <span className={"dot" + (live ? " dot-live" : "")} />
                   {live ? "Connected" : "Disconnected"}
                 </p>
-                <p className="muted small">{live ? "to " + formatCode(peerCode) : "The other device left."}</p>
+                <p className="muted small">
+                  {!live
+                    ? "The other device left."
+                    : (peerCode ? "to " + formatCode(peerCode) : "by QR code") +
+                      (route === "relay" ? " · through a relay" : route === "direct" ? " · direct" : "")}
+                </p>
               </div>
               <button className="ghost-button" onClick={startOver} type="button">
                 {live ? "Disconnect" : "New connection"}
@@ -794,6 +801,13 @@ export default function TransferlyApp() {
                   type="file"
                 />
               </div>
+            ) : null}
+
+            {live && route === "relay" ? (
+              <p className="muted small center relay-note">
+                Your networks couldn&apos;t connect directly, so this goes through a free relay. Files up to{" "}
+                {formatBytes(relayMaxBytes)} can be sent. Use the same Wi-Fi for bigger files.
+              </p>
             ) : null}
 
             {transfers.length ? (
@@ -856,7 +870,9 @@ function TransferRow({ item }: { item: Transfer }) {
   const incoming = item.direction === "in";
   const detail =
     item.status === "failed"
-      ? "Failed"
+      ? item.note
+        ? item.note + " · " + formatBytes(item.size)
+        : "Failed"
       : item.status === "done"
         ? formatBytes(item.size) + (incoming ? "" : " · Delivered")
         : item.status === "queued"

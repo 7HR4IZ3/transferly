@@ -6,6 +6,8 @@
  * File bytes travel only over this DTLS-encrypted link — never via the server.
  */
 
+import { SIGNAL_URL } from "./pairing";
+
 export type LinkState = "connecting" | "open" | "closed" | "failed";
 
 export type Transfer = {
@@ -16,7 +18,12 @@ export type Transfer = {
   bytes: number;
   status: "queued" | "active" | "done" | "failed";
   url?: string;
+  /** Why a transfer didn't go through, when it's not just a dropped connection. */
+  note?: string;
 };
+
+/** How the connection travels: straight between the devices, or via a TURN relay. */
+export type Route = "direct" | "relay";
 
 type Control =
   | { t: "file"; id: string; name: string; size: number; mime: string }
@@ -26,38 +33,62 @@ type Control =
 type Handlers = {
   onState: (state: LinkState) => void;
   onTransfer: (transfer: Transfer) => void;
+  onRoute?: (route: Route) => void;
+  /** Bytes this device sent through the relay since the last report. */
+  onRelayUsage?: (bytes: number) => void;
+};
+
+export type IceConfig = {
+  servers: RTCIceServer[];
+  /** Largest file allowed when the connection goes through the relay. */
+  relayMaxBytes: number;
+  /** Set when the relay was not offered: "budget", "not-configured", … */
+  relayUnavailable?: string;
 };
 
 const DEFAULT_CHUNK = 64 * 1024;
 const HIGH_WATER = 4 * 1024 * 1024;
 const LOW_WATER = 1024 * 1024;
 const PROGRESS_INTERVAL = 100;
+const USAGE_REPORT_BYTES = 25 * 1024 * 1024;
+const DEFAULT_RELAY_MAX_BYTES = 1024 * 1024 * 1024;
 
 const FALLBACK_ICE: RTCIceServer[] = [{ urls: ["stun:stun.cloudflare.com:3478", "stun:stun.l.google.com:19302"] }];
-let iceCache: { servers: RTCIceServer[]; at: number } | null = null;
 
 /**
- * STUN + (if configured on the server) TURN relay servers. Cached for 10
- * minutes. Returns no servers when offline, so local pairing doesn't wait
- * on unreachable hosts.
+ * STUN plus, when available, TURN relay servers. With the Cloudflare Worker
+ * (NEXT_PUBLIC_SIGNAL_URL), relay access is only granted to a device that owns
+ * a code and is mid-pairing, so pass its mailbox credentials. Returns no
+ * servers when offline, so local pairing doesn't wait on unreachable hosts.
  */
-export async function loadIceServers(): Promise<RTCIceServer[]> {
-  if (typeof navigator !== "undefined" && !navigator.onLine) return [];
-  if (iceCache && Date.now() - iceCache.at < 10 * 60_000) return iceCache.servers;
+export async function loadIceConfig(auth?: { id: string; secret: string }): Promise<IceConfig> {
+  const fallback: IceConfig = { servers: FALLBACK_ICE, relayMaxBytes: DEFAULT_RELAY_MAX_BYTES };
+  if (typeof navigator !== "undefined" && !navigator.onLine) return { ...fallback, servers: [] };
   try {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 4000);
-    const response = await fetch("/api/ice", { cache: "no-store", signal: controller.signal });
+    const timer = setTimeout(() => controller.abort(), 5000);
+    const response = SIGNAL_URL
+      ? await fetch(SIGNAL_URL + "/ice", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(auth ?? {}),
+          cache: "no-store",
+          signal: controller.signal,
+        })
+      : await fetch("/api/ice", { cache: "no-store", signal: controller.signal });
     clearTimeout(timer);
-    const data = (await response.json()) as { iceServers?: RTCIceServer[] };
+    const data = (await response.json()) as { iceServers?: RTCIceServer[]; relayMaxBytes?: number; reason?: string };
     if (response.ok && Array.isArray(data.iceServers) && data.iceServers.length) {
-      iceCache = { servers: data.iceServers, at: Date.now() };
-      return data.iceServers;
+      return {
+        servers: data.iceServers,
+        relayMaxBytes: typeof data.relayMaxBytes === "number" ? data.relayMaxBytes : DEFAULT_RELAY_MAX_BYTES,
+        relayUnavailable: data.reason,
+      };
     }
   } catch {
     // Fall through to public STUN.
   }
-  return FALLBACK_ICE;
+  return fallback;
 }
 
 function waitForIce(pc: RTCPeerConnection, timeoutMs = 5000) {
@@ -87,12 +118,18 @@ export class PeerLink {
   private pendingAcks = new Map<string, Transfer>();
   private incoming: { transfer: Transfer; mime: string; chunks: ArrayBuffer[]; lastEmit: number } | null = null;
 
+  private relayed = false;
+  private routeKnown = false;
+  private relayBytesUnreported = 0;
+  private relayMaxBytes: number;
+
   constructor(
     readonly initiator: boolean,
     private handlers: Handlers,
-    iceServers: RTCIceServer[] = [],
+    ice: IceConfig = { servers: [], relayMaxBytes: DEFAULT_RELAY_MAX_BYTES },
   ) {
-    this.pc = new RTCPeerConnection({ iceServers });
+    this.relayMaxBytes = ice.relayMaxBytes;
+    this.pc = new RTCPeerConnection({ iceServers: ice.servers });
     // Initiator sends on 0 and receives on 1; the answerer mirrors that.
     const channelA = this.pc.createDataChannel("a", { negotiated: true, id: 0, ordered: true });
     const channelB = this.pc.createDataChannel("b", { negotiated: true, id: 1, ordered: true });
@@ -151,10 +188,20 @@ export class PeerLink {
   send(files: File[]) {
     for (const file of files) {
       const transfer: Transfer = { id: newId(), direction: "out", name: file.name, size: file.size, bytes: 0, status: "queued" };
+      if (this.relayed && file.size > this.relayMaxBytes) {
+        // Keep the free relay within budget: big files need a direct connection.
+        this.handlers.onTransfer({ ...transfer, status: "failed", note: "Too big for a relayed connection" });
+        continue;
+      }
       this.queue.push({ transfer, file });
       this.handlers.onTransfer(transfer);
     }
     void this.pump();
+  }
+
+  /** Largest file that can be sent right now (Infinity on a direct connection). */
+  get maxFileBytes() {
+    return this.relayed ? this.relayMaxBytes : Infinity;
   }
 
   close() {
@@ -162,11 +209,49 @@ export class PeerLink {
     this.pc.close();
   }
 
+  /** Work out whether the selected route goes through a TURN relay. */
+  private async detectRoute() {
+    try {
+      const stats = await this.pc.getStats();
+      let pairId: string | undefined;
+      stats.forEach((report) => {
+        if (report.type === "transport" && report.selectedCandidatePairId) pairId = report.selectedCandidatePairId;
+      });
+      let pair: RTCIceCandidatePairStats | undefined;
+      stats.forEach((report) => {
+        if (report.type !== "candidate-pair") return;
+        if (pairId ? report.id === pairId : report.nominated && report.state === "succeeded") pair = report as RTCIceCandidatePairStats;
+      });
+      if (!pair) return;
+      const types = [stats.get(pair.localCandidateId)?.candidateType, stats.get(pair.remoteCandidateId)?.candidateType];
+      this.relayed = types.includes("relay");
+      this.handlers.onRoute?.(this.relayed ? "relay" : "direct");
+    } catch {
+      // Stats are best-effort.
+    } finally {
+      this.routeKnown = true;
+    }
+  }
+
+  private countRelayBytes(bytes: number, flush = false) {
+    if (!this.relayed) return;
+    this.relayBytesUnreported += bytes;
+    if (flush || this.relayBytesUnreported >= USAGE_REPORT_BYTES) {
+      if (this.relayBytesUnreported > 0) this.handlers.onRelayUsage?.(this.relayBytesUnreported);
+      this.relayBytesUnreported = 0;
+    }
+  }
+
   private setState(next: LinkState) {
     if (this.state === next || this.state === "closed" || this.state === "failed") return;
     this.state = next;
-    if (next === "open") void this.pump();
-    else this.failInFlight();
+    if (next === "open") {
+      // Find the route before sending, so the relay size cap applies from the start.
+      void this.detectRoute().then(() => this.pump());
+    } else {
+      this.countRelayBytes(0, true);
+      this.failInFlight();
+    }
     this.handlers.onState(next);
   }
 
@@ -203,13 +288,18 @@ export class PeerLink {
   }
 
   private async pump() {
-    if (this.pumping || !this.isOpen) return;
+    if (this.pumping || !this.isOpen || !this.routeKnown) return;
     this.pumping = true;
     const chunkSize = Math.min(DEFAULT_CHUNK, this.pc.sctp?.maxMessageSize || DEFAULT_CHUNK);
 
     try {
       while (this.queue.length && this.isOpen) {
         const { transfer, file } = this.queue[0];
+        if (this.relayed && file.size > this.relayMaxBytes) {
+          this.queue.shift();
+          this.handlers.onTransfer({ ...transfer, status: "failed", note: "Too big for a relayed connection" });
+          continue;
+        }
         let current: Transfer = { ...transfer, status: "active" };
         this.handlers.onTransfer(current);
         this.sendControl({ t: "file", id: transfer.id, name: file.name, size: file.size, mime: file.type || "application/octet-stream" });
@@ -221,6 +311,7 @@ export class PeerLink {
           const chunk = await file.slice(offset, offset + chunkSize).arrayBuffer();
           this.outChannel.send(chunk);
           offset += chunk.byteLength;
+          this.countRelayBytes(chunk.byteLength);
           const now = performance.now();
           if (now - lastEmit > PROGRESS_INTERVAL) {
             lastEmit = now;

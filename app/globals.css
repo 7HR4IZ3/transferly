@@ -556,6 +556,10 @@ button {
   color: var(--accent);
 }
 
+.relay-note {
+  margin-top: 12px;
+}
+
 .transfers {
   display: grid;
   gap: 4px;

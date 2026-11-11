@@ -1,0 +1,21 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "transferly-signal",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-09-01",
+  "durable_objects": {
+    "bindings": [
+      { "name": "MAILBOX", "class_name": "Mailbox" },
+      { "name": "BUDGET", "class_name": "Budget" }
+    ]
+  },
+  // SQLite-backed Durable Objects are what the Workers free plan supports.
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Mailbox", "Budget"] }],
+  "vars": {
+    // Set to your site's origin(s), e.g. "https://transferly-khaki.vercel.app", to stop other sites using this Worker.
+    "ALLOWED_ORIGINS": "*",
+    "RELAY_MONTHLY_GB": "900",
+    "RELAY_MAX_FILE_MB": "1024"
+  }
+  // Secrets (not stored here): wrangler secret put CLOUDFLARE_TURN_KEY_ID / CLOUDFLARE_TURN_API_TOKEN
+}

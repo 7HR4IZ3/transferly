@@ -15,6 +15,7 @@ With no internet, the app still opens (it's cached after the first visit), and d
 - [Timeouts and limits](#timeouts-and-limits)
 - [Running locally](#running-locally)
 - [Deploying](#deploying)
+  - [Pairing server](#1-pairing-server-cloudflare-worker)
 - [Known limitations](#known-limitations)
 - [Code map](#code-map)
 
@@ -43,21 +44,20 @@ Other outcomes:
 ## Architecture
 
 ```
- Browser A                    Next.js server                    Browser B
- ─────────                    ──────────────                    ─────────
- claim mailbox  ───────────▶  /api/signal  ◀───────────  claim mailbox
- poll every 1.2 s ◀────────▶  (mailboxes in   ◀────────▶ poll every 1.2 s
-                              Redis or memory)
-        encrypted request / accept / offer / answer go through the mailboxes
+ Browser A              Cloudflare Worker (free plan)             Browser B
+ ─────────              ─────────────────────────────             ─────────
+ WebSocket  ══════════▶ Durable Object per code  ◀────── POST /send (encrypted)
+ (holds code 482913)    pushes messages instantly
+                        /ice: relay credentials (only while pairing, within budget)
 
  ═══════════════ direct WebRTC connection (DTLS-encrypted) ═══════════════
-                     files travel only on this connection
+           files travel only on this connection (or via the TURN relay)
 ```
 
-- **Frontend:** a single client component (`components/transferly-app.tsx`) built with Next.js App Router and React 19.
-- **Signaling server:** one route, `POST /api/signal`, which stores small encrypted messages in per-device *mailboxes*. It is used only to set up the connection.
-- **Storage:** Upstash Redis (or Vercel KV) when configured, otherwise an in-memory map.
-- **Transport:** WebRTC data channels between the browsers. STUN (Google's public servers by default) helps devices on different networks find each other; TURN can be added for strict networks.
+- **Frontend:** Next.js App Router and React 19, deployed on Vercel. A single client component, `components/transferly-app.tsx`, plus a service worker for offline use.
+- **Pairing server (recommended): `worker/`.** A Cloudflare Worker with one Durable Object per code. The code's owner keeps a WebSocket open, and messages sent to the code are pushed down it immediately. Idle sockets hibernate, so they cost almost nothing, and nothing polls. See [Deploying](#1-pairing-server-cloudflare-worker).
+- **Pairing server (fallback): `POST /api/signal`** on the Next.js app, which browsers poll every 1.2 s. It's used when `NEXT_PUBLIC_SIGNAL_URL` isn't set, and needs Upstash Redis on Vercel.
+- **Transport:** WebRTC data channels. STUN finds a direct path; a TURN relay (Cloudflare Realtime) is the fallback for networks that block direct connections.
 
 ## Pairing protocol
 
@@ -72,7 +72,10 @@ On load, each browser:
 
 The **secret is needed to read** the mailbox, so nobody else can drain it. **Anyone may write** to a mailbox if they know the code, since writing requires computing its id.
 
-Each browser then polls its own mailbox every 1.2 s, or every 3.6 s while the tab is hidden. Each poll returns and deletes any waiting messages and resets the mailbox's 10-minute expiry. If the mailbox has vanished (for example after a server restart), the browser automatically claims a new code.
+**Receiving messages:**
+
+- **With the Worker:** the browser opens a WebSocket to `/ws?id=…&secret=…`, and that connection *is* the claim. The Durable Object for that id stores the secret and pushes each message as it arrives. If the socket drops (for example when a phone backgrounds the tab), the browser reconnects with the same secret, and messages sent in the meantime are queued (up to 16) and delivered. A code is freed 10 minutes after its owner's last socket closes, or straight away on release.
+- **With the fallback:** the browser polls its mailbox every 1.2 s (3.6 s while the tab is hidden). If the mailbox has gone, it claims a new code.
 
 ### Messages
 
@@ -196,8 +199,10 @@ Each file is sent as:
 | Code length | 6 digits | `lib/pairing.ts` |
 | Mailbox lifetime | 10 min, renewed on every poll | `lib/server/store.ts` |
 | Messages waiting per mailbox | 16 max | `lib/server/store.ts` |
-| Max message size | 32 KB | `app/api/signal/route.ts` |
-| Poll interval | 1.2 s visible, 3.6 s hidden | `components/transferly-app.tsx` |
+| Max message size | 32 KB | `app/api/signal/route.ts`, `worker/src/index.ts` |
+| Poll interval (fallback only) | 1.2 s visible, 3.6 s hidden | `lib/pairing.ts` |
+| WebSocket keep-alive | ping every 25 s | `lib/pairing.ts` |
+| Relay file cap / monthly budget | 1024 MB / 900 GB (configurable) | `worker/wrangler.jsonc` |
 | Request expiry (unanswered) | 2 min | `components/transferly-app.tsx` |
 | Accept → connected timeout | 30 s | `components/transferly-app.tsx` |
 | QR reply scanned → connected timeout | 45 s | `components/transferly-app.tsx` |
@@ -228,16 +233,59 @@ To try it on one machine, open the app in two isolated sessions, for example a n
 
 ## Deploying
 
-| Variable | Purpose |
+Everything here fits in free tiers:
+
+- **Vercel Hobby:** the site.
+- **Cloudflare Workers free plan:** pairing.
+- **Cloudflare Realtime TURN:** relay, 1,000 GB a month free.
+
+### 1. Pairing server (Cloudflare Worker)
+
+```bash
+cd worker
+npm install
+npx wrangler login                                  # free Cloudflare account
+npx wrangler deploy                                 # prints https://transferly-signal.<you>.workers.dev
+```
+
+Then, in Vercel, set `NEXT_PUBLIC_SIGNAL_URL` to that URL and redeploy. It's read at build time.
+
+Optionally, set `ALLOWED_ORIGINS` in `worker/wrangler.jsonc` to your site's origin (e.g. `https://transferly-khaki.vercel.app`) and deploy again, so other sites can't use your Worker.
+
+### 2. Relay (Cloudflare Realtime TURN)
+
+In the Cloudflare dashboard, open **Realtime → TURN Server** and create a key. Then:
+
+```bash
+cd worker
+npx wrangler secret put CLOUDFLARE_TURN_KEY_ID      # paste the Turn Token ID
+npx wrangler secret put CLOUDFLARE_TURN_API_TOKEN   # paste the API token
+```
+
+### Relay guardrails (keeping it free)
+
+| Guardrail | How |
 | --- | --- |
-| `UPSTASH_REDIS_REST_URL` + `UPSTASH_REDIS_REST_TOKEN`, or `KV_REST_API_URL` + `KV_REST_API_TOKEN`, or any prefixed variant ending in `KV_REST_API_URL` / `KV_REST_API_TOKEN` (for example `UPSTASH_REDIS_REST_KV_REST_API_URL`) | Shared mailbox storage. **Required on serverless hosts such as Vercel**, where requests from the two devices can land on different instances. Without these variables an in-memory store is used, which works only with a single server process. |
-| `CLOUDFLARE_TURN_KEY_ID` + `CLOUDFLARE_TURN_API_TOKEN` | **Recommended.** Cloudflare Realtime TURN relay. `/api/ice` creates short-lived relay credentials for each browser. |
-| `TURN_CREDENTIALS_URL` | Alternative: any URL that returns an `iceServers` array, e.g. Metered's `https://<app>.metered.live/api/v1/turn/credentials?apiKey=…`. |
-| `TURN_URLS` + `TURN_USERNAME` + `TURN_CREDENTIAL` | Alternative: your own TURN server (e.g. coturn). Takes comma-separated `turn:`/`turns:` URLs. |
+| Relay only while pairing | `/ice` hands out relay credentials only to a device that proves it owns a live code (with its secret) and received a pairing message in the last 10 minutes. QR pairing and random callers get STUN only. |
+| Short-lived credentials | Relay credentials expire after 1 hour. |
+| Size cap over the relay | After connecting, each browser checks whether its route uses the relay. If so, files over `RELAY_MAX_FILE_MB` (default 1024) are refused with *Too big for a relayed connection*. Direct connections have no cap. |
+| Monthly budget | Browsers report bytes they send through the relay to `/usage`. Once `RELAY_MONTHLY_GB` (default 900, under the 1,000 GB free tier) is reached, `/ice` stops offering the relay until next month. Direct connections and QR pairing keep working. |
 
-Without a TURN relay, devices on networks that block direct connections (mobile carriers, office and guest Wi-Fi, some home routers) fail with *Couldn't connect the two devices…*. The relay only forwards traffic, which stays DTLS-encrypted, so it can't read files. Browsers always try a direct path first; the relay is a fallback. When a connection fails, the browser console logs which kinds of route each side offered (`host` = local network, `srflx` = public address, `relay` = TURN).
+The guardrails rely on the app reporting honestly. Someone with valid credentials could misuse them for up to an hour, so treat the budget as a safety margin, not a hard limit. Check your Cloudflare account's billing settings too.
 
-The app must be served over HTTPS (Vercel does this automatically).
+### Fallback: pairing on Vercel only
+
+Without `NEXT_PUBLIC_SIGNAL_URL`, the app pairs through its own `/api/signal` by polling. On Vercel this needs Upstash Redis, and the polling uses up free tiers quickly. A tab left open makes roughly one request per second.
+
+| Variable (on Vercel) | Purpose |
+| --- | --- |
+| `UPSTASH_REDIS_REST_URL` + `UPSTASH_REDIS_REST_TOKEN`, or `KV_REST_API_URL` + `KV_REST_API_TOKEN`, or any prefixed variant ending in those names | Shared mailbox storage for the fallback. |
+| `CLOUDFLARE_TURN_KEY_ID` + `CLOUDFLARE_TURN_API_TOKEN`, `TURN_CREDENTIALS_URL`, or `TURN_URLS` + `TURN_USERNAME` + `TURN_CREDENTIAL` | Relay for the fallback's `/api/ice`. The guardrails above apply only to the Worker. |
+
+### Notes
+
+- Browsers always try a direct path first; the relay is only a fallback. When a connection fails, the error message lists which routes each device offered.
+- The site must be served over HTTPS (Vercel does this automatically).
 
 ## Known limitations
 
@@ -261,6 +309,7 @@ The app must be served over HTTPS (Vercel does this automatically).
 | `lib/qr-signal.ts` | Packs a WebRTC description into a short QR string, and back. |
 | `components/qr.tsx` | QR code display and camera scanner (native `BarcodeDetector` or jsQR). |
 | `app/api/ice/route.ts` | Returns STUN servers plus TURN relay credentials, when configured. |
+| `worker/src/index.ts` | Cloudflare Worker: `Mailbox` Durable Object (one WebSocket per code), `Budget` Durable Object, and the `/ws`, `/send`, `/ice` and `/usage` routes. |
 | `app/api/signal/route.ts` | The `claim`, `send`, `poll` and `release` actions, with validation and rate limits. |
 | `lib/server/store.ts` | Mailbox storage: Upstash REST (`/multi-exec`) or an in-memory fallback. |
 | `public/sw.js` | Service worker that saves the app for offline use. |
