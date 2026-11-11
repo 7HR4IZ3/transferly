@@ -6,6 +6,7 @@
  * File bytes travel only over this DTLS-encrypted link — never via the server.
  */
 
+import { createSink, type IncomingMeta, type Sink, type StorageKind } from "./files";
 import { SIGNAL_URL } from "./pairing";
 
 export type LinkState = "connecting" | "open" | "closed" | "failed";
@@ -17,7 +18,15 @@ export type Transfer = {
   size: number;
   bytes: number;
   status: "queued" | "active" | "done" | "failed";
-  url?: string;
+  mime?: string;
+  /** When bytes started flowing (for speed / time left). */
+  startedAt?: number;
+  /** Received data (a disk-backed File, or a Blob in memory), when the app keeps it. */
+  blob?: Blob;
+  /** Where a received file ended up. */
+  storage?: StorageKind;
+  location?: string;
+  crc?: number;
   /** Why a transfer didn't go through, when it's not just a dropped connection. */
   note?: string;
 };
@@ -36,6 +45,8 @@ type Handlers = {
   onRoute?: (route: Route) => void;
   /** Bytes this device sent through the relay since the last report. */
   onRelayUsage?: (bytes: number) => void;
+  /** Where incoming files are written (defaults to disk-backed browser storage). */
+  createSink?: (meta: IncomingMeta) => Sink;
 };
 
 export type IceConfig = {
@@ -119,7 +130,7 @@ export class PeerLink {
   private queue: { transfer: Transfer; file: File }[] = [];
   private pumping = false;
   private pendingAcks = new Map<string, Transfer>();
-  private incoming: { transfer: Transfer; mime: string; chunks: ArrayBuffer[]; lastEmit: number } | null = null;
+  private incoming: { transfer: Transfer; sink: Sink; lastEmit: number } | null = null;
 
   private relayed = false;
   private routeKnown = false;
@@ -264,7 +275,10 @@ export class PeerLink {
 
   private failInFlight() {
     const failed = [...this.queue.map((entry) => entry.transfer), ...this.pendingAcks.values()];
-    if (this.incoming) failed.push(this.incoming.transfer);
+    if (this.incoming) {
+      this.incoming.sink.abort();
+      failed.push(this.incoming.transfer);
+    }
     this.queue = [];
     this.pendingAcks.clear();
     this.incoming = null;
@@ -303,7 +317,7 @@ export class PeerLink {
           this.handlers.onTransfer({ ...transfer, status: "failed", note: "Too big for a relayed connection" });
           continue;
         }
-        let current: Transfer = { ...transfer, status: "active" };
+        let current: Transfer = { ...transfer, status: "active", startedAt: Date.now() };
         this.handlers.onTransfer(current);
         this.sendControl({ t: "file", id: transfer.id, name: file.name, size: file.size, mime: file.type || "application/octet-stream" });
 
@@ -340,7 +354,7 @@ export class PeerLink {
     if (typeof event.data !== "string") {
       const incoming = this.incoming;
       if (!incoming) return;
-      incoming.chunks.push(event.data as ArrayBuffer);
+      incoming.sink.write(event.data as ArrayBuffer);
       incoming.transfer.bytes += (event.data as ArrayBuffer).byteLength;
       const now = performance.now();
       if (now - incoming.lastEmit > PROGRESS_INTERVAL) {
@@ -358,19 +372,39 @@ export class PeerLink {
     }
 
     if (message.t === "file") {
-      const transfer: Transfer = { id: message.id, direction: "in", name: message.name, size: message.size, bytes: 0, status: "active" };
-      this.incoming = { transfer, mime: message.mime, chunks: [], lastEmit: 0 };
+      const transfer: Transfer = {
+        id: message.id,
+        direction: "in",
+        name: message.name,
+        size: message.size,
+        mime: message.mime,
+        bytes: 0,
+        status: "active",
+        startedAt: Date.now(),
+      };
+      const meta = { id: message.id, name: message.name, size: message.size, mime: message.mime };
+      const sink = this.handlers.createSink ? this.handlers.createSink(meta) : createSink(meta, null);
+      this.incoming = { transfer, sink, lastEmit: 0 };
       this.handlers.onTransfer({ ...transfer });
     } else if (message.t === "end" && this.incoming?.transfer.id === message.id) {
-      const { transfer, chunks, mime } = this.incoming;
+      const { transfer, sink } = this.incoming;
       this.incoming = null;
       if (transfer.bytes !== transfer.size) {
+        sink.abort();
         this.handlers.onTransfer({ ...transfer, status: "failed" });
         return;
       }
-      const url = URL.createObjectURL(new Blob(chunks, { type: mime }));
-      this.handlers.onTransfer({ ...transfer, status: "done", url });
-      this.sendControl({ t: "ack", id: transfer.id });
+      // Finish writing to disk, then confirm, so "Delivered" means it's really saved.
+      sink.finish().then(
+        (saved) => {
+          this.handlers.onTransfer({ ...transfer, status: "done", ...saved });
+          this.sendControl({ t: "ack", id: transfer.id });
+        },
+        () => {
+          sink.abort();
+          this.handlers.onTransfer({ ...transfer, status: "failed", note: "Couldn't save (is the disk full?)" });
+        },
+      );
     } else if (message.t === "ack") {
       const transfer = this.pendingAcks.get(message.id);
       if (transfer) {

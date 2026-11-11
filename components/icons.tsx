@@ -1,11 +1,15 @@
 export {
   ArrowDown,
+  ArrowLeft,
   ArrowUp,
   Check,
+  ClockCounterClockwise as HistoryIcon,
   Copy,
   DownloadSimple as Download,
+  FolderSimple as FolderIcon,
   LockSimple as Lock,
   Plus,
   QrCode as QrIcon,
+  Trash,
   X as XIcon,
 } from "@phosphor-icons/react";

@@ -1,7 +1,11 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState, type ChangeEvent, type DragEvent } from "react";
-import { ArrowDown, ArrowUp, Check, Copy, Download, Lock, Plus, QrIcon, XIcon } from "./icons";
+import { useCallback, useEffect, useRef, useState, type ChangeEvent } from "react";
+import { ArrowDown, Check, Copy, HistoryIcon, Lock, QrIcon } from "./icons";
+import { HistoryPanel } from "./history-panel";
+import { TransferPanel } from "./transfer-panel";
+import { canPickFolder, createSink, pickFolder, requestPersistence } from "../lib/files";
+import { history } from "../lib/history";
 import { QrCode, QrScanner } from "./qr";
 import { CODE_LIFETIME_MS, Mailbox, PairingError, formatCode, isValidCode, randomToken, reportRelayUsage, type SignalMessage } from "../lib/pairing";
 import { PeerLink, loadIceConfig, type IceConfig, type LinkState, type Route, type Transfer } from "../lib/peer";
@@ -25,18 +29,6 @@ const QR_CONNECT_TIMEOUT_MS = 45_000;
  */
 type QrStep = "menu" | "preparing" | "show-offer" | "scan-offer" | "show-answer";
 
-function formatBytes(bytes: number) {
-  if (bytes < 1024) return bytes + " B";
-  const units = ["KB", "MB", "GB", "TB"];
-  let value = bytes / 1024;
-  let unit = 0;
-  while (value >= 1024 && unit < units.length - 1) {
-    value /= 1024;
-    unit += 1;
-  }
-  return (value >= 10 ? value.toFixed(0) : value.toFixed(1)) + " " + units[unit];
-}
-
 export default function TransferlyApp() {
   const [phase, setPhase] = useState<Phase>("loading");
   const [myCode, setMyCode] = useState("");
@@ -54,7 +46,9 @@ export default function TransferlyApp() {
   const [now, setNow] = useState(0);
   const [transfers, setTransfers] = useState<Transfer[]>([]);
   const [copied, setCopied] = useState(false);
-  const [dragging, setDragging] = useState(false);
+  const [view, setView] = useState<"main" | "history">("main");
+  const [folder, setFolder] = useState<FileSystemDirectoryHandle | null>(null);
+  const [folderSupported, setFolderSupported] = useState(false);
 
   const mailboxRef = useRef<Mailbox | null>(null);
   const linkRef = useRef<PeerLink | null>(null);
@@ -67,7 +61,7 @@ export default function TransferlyApp() {
   const relayDetailRef = useRef<string | undefined>(undefined);
   const inputRef = useRef("");
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const folderRef = useRef<FileSystemDirectoryHandle | null>(null);
 
   const go = useCallback((next: Phase) => {
     phaseRef.current = next;
@@ -86,6 +80,21 @@ export default function TransferlyApp() {
   }, []);
 
   const upsertTransfer = useCallback((transfer: Transfer) => {
+    if (transfer.status === "done" || transfer.status === "failed") {
+      history.record({
+        key: transfer.direction + ":" + transfer.id,
+        direction: transfer.direction,
+        name: transfer.name,
+        size: transfer.size,
+        mime: transfer.mime,
+        peer: targetRef.current || undefined,
+        at: Date.now(),
+        status: transfer.status,
+        storage: transfer.storage,
+        location: transfer.location,
+        crc: transfer.crc,
+      });
+    }
     setTransfers((current) => {
       const index = current.findIndex((item) => item.id === transfer.id && item.direction === transfer.direction);
       if (index === -1) return [transfer, ...current];
@@ -179,6 +188,11 @@ export default function TransferlyApp() {
           onTransfer: upsertTransfer,
           onRoute: (next) => linkRef.current === link && setRoute(next),
           onRelayUsage: reportRelayUsage,
+          // Stream incoming files to disk (a chosen folder, or browser storage).
+          createSink: (meta) => {
+            requestPersistence();
+            return createSink(meta, folderRef.current);
+          },
         },
         ice,
       );
@@ -413,6 +427,13 @@ export default function TransferlyApp() {
     return () => clearInterval(timer);
   }, [myCode, renewCode]);
 
+  useEffect(() => {
+    void history.expire();
+    // Feature detection has to wait for the browser (not available during prerender).
+    const timer = setTimeout(() => setFolderSupported(canPickFolder()), 0);
+    return () => clearTimeout(timer);
+  }, []);
+
   // Cache the app for offline use (production only, so dev builds never go stale).
   useEffect(() => {
     if (process.env.NODE_ENV !== "production" || !("serviceWorker" in navigator)) return;
@@ -591,26 +612,31 @@ export default function TransferlyApp() {
     }
   };
 
-  const sendFiles = (list: FileList | null) => {
-    if (list?.length && linkRef.current?.isOpen) linkRef.current.send(Array.from(list));
+  const sendFiles = (files: File[]) => {
+    if (files.length && linkRef.current?.isOpen) linkRef.current.send(files);
+  };
+
+  const chooseFolder = async () => {
+    const handle = await pickFolder();
+    if (!handle) return;
+    folderRef.current = handle;
+    setFolder(handle);
+  };
+
+  const clearFolder = () => {
+    folderRef.current = null;
+    setFolder(null);
   };
 
   const startOver = () => {
     linkRef.current?.close();
     linkRef.current = null;
-    setTransfers((current) => {
-      current.forEach((item) => item.url && URL.revokeObjectURL(item.url));
-      return [];
-    });
+    setTransfers([]);
     backToIdle();
     claimCode();
   };
 
-  const onDrop = (event: DragEvent) => {
-    event.preventDefault();
-    setDragging(false);
-    sendFiles(event.dataTransfer.files);
-  };
+
 
   const live = phase === "connected";
   const paired = phase === "connected" || phase === "ended";
@@ -622,9 +648,14 @@ export default function TransferlyApp() {
           <span className="brand-mark" aria-hidden />
           transferly
         </span>
+        <button className="ghost-button header-button" onClick={() => setView(view === "history" ? "main" : "history")} type="button">
+          <HistoryIcon size={15} /> {view === "history" ? "Close history" : "History"}
+        </button>
       </header>
 
-      <section className="card" aria-live="polite">
+      <section className={"card" + (paired || view === "history" ? " card-wide" : "")} aria-live="polite">
+        {view === "history" ? <HistoryPanel onBack={() => setView("main")} /> : null}
+        <div hidden={view === "history"}>
         {!paired && request && phase === "idle" ? (
           <div className="request">
             <span className="request-icon">
@@ -807,77 +838,21 @@ export default function TransferlyApp() {
             ) : null}
           </>
         ) : (
-          <>
-            <div className="connected-head">
-              <div>
-                <p className="peer">
-                  <span className={"dot" + (live ? " dot-live" : "")} />
-                  {live ? "Connected" : "Disconnected"}
-                </p>
-                <p className="muted small">
-                  {!live
-                    ? "The other device left."
-                    : (peerCode ? "to " + formatCode(peerCode) : "by QR code") +
-                      (route === "relay" ? " · through a relay" : route === "direct" ? " · direct" : "")}
-                </p>
-              </div>
-              <button className="ghost-button" onClick={startOver} type="button">
-                {live ? "Disconnect" : "New connection"}
-              </button>
-            </div>
-
-            {live ? (
-              <div
-                className={"drop" + (dragging ? " drop-active" : "")}
-                onClick={() => fileInputRef.current?.click()}
-                onDragEnter={(event) => {
-                  event.preventDefault();
-                  setDragging(true);
-                }}
-                onDragLeave={() => setDragging(false)}
-                onDragOver={(event) => event.preventDefault()}
-                onDrop={onDrop}
-                onKeyDown={(event) => (event.key === "Enter" || event.key === " ") && fileInputRef.current?.click()}
-                role="button"
-                tabIndex={0}
-              >
-                <span className="drop-icon">
-                  <Plus size={20} />
-                </span>
-                <span>
-                  <strong>Drop files</strong> or click to choose
-                </span>
-                <input
-                  hidden
-                  multiple
-                  onChange={(event) => {
-                    sendFiles(event.target.files);
-                    event.target.value = "";
-                  }}
-                  ref={fileInputRef}
-                  type="file"
-                />
-              </div>
-            ) : null}
-
-            {live && route === "relay" ? (
-              <p className="muted small center relay-note">
-                Your networks couldn&apos;t connect directly, so this goes through a free relay. Files up to{" "}
-                {formatBytes(relayMaxBytes)} can be sent. Use the same Wi-Fi for bigger files.
-              </p>
-            ) : null}
-
-            {transfers.length ? (
-              <ul className="transfers">
-                {transfers.map((item) => (
-                  <TransferRow item={item} key={item.direction + item.id} />
-                ))}
-              </ul>
-            ) : live ? (
-              <p className="muted small center">Files you send or receive will appear here.</p>
-            ) : null}
-          </>
+          <TransferPanel
+            canPickFolder={folderSupported}
+            folderName={folder?.name ?? null}
+            live={live}
+            onClearFolder={clearFolder}
+            onLeave={startOver}
+            onPickFolder={() => void chooseFolder()}
+            onSend={sendFiles}
+            peerLabel={peerCode ? "to " + formatCode(peerCode) : "by QR code"}
+            relayMaxBytes={relayMaxBytes}
+            route={route}
+            transfers={transfers}
+          />
         )}
+        </div>
       </section>
 
       <footer className="foot">
@@ -954,49 +929,4 @@ function Status({
     );
   }
   return <p className="status muted">Only one of you needs to type a code. The other just taps Accept.</p>;
-}
-
-function TransferRow({ item }: { item: Transfer }) {
-  const percent = item.size ? Math.round((item.bytes / item.size) * 100) : 100;
-  const incoming = item.direction === "in";
-  const detail =
-    item.status === "failed"
-      ? item.note
-        ? item.note + " · " + formatBytes(item.size)
-        : "Failed"
-      : item.status === "done"
-        ? formatBytes(item.size) + (incoming ? "" : " · Delivered")
-        : item.status === "queued"
-          ? "Queued · " + formatBytes(item.size)
-          : formatBytes(item.bytes) + " of " + formatBytes(item.size);
-
-  return (
-    <li className={"transfer" + (item.status === "failed" ? " transfer-failed" : "")}>
-      <span className={"badge" + (incoming ? " badge-in" : "")} aria-label={incoming ? "Received" : "Sent"}>
-        {incoming ? <ArrowDown size={15} /> : <ArrowUp size={15} />}
-      </span>
-      <div className="transfer-body">
-        <p className="transfer-name" title={item.name}>
-          {item.name}
-        </p>
-        <p className="muted small">{detail}</p>
-        {item.status === "active" ? (
-          <div className="bar">
-            <div className="bar-fill" style={{ width: percent + "%" }} />
-          </div>
-        ) : null}
-      </div>
-      {incoming && item.url ? (
-        <a className="save" download={item.name} href={item.url}>
-          <Download size={15} /> Save
-        </a>
-      ) : item.status === "done" ? (
-        <Check className="ok" size={18} />
-      ) : item.status === "failed" ? (
-        <XIcon className="bad" size={18} />
-      ) : (
-        <span className="muted small">{percent}%</span>
-      )}
-    </li>
-  );
 }

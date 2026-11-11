@@ -157,6 +157,26 @@ The other side rebuilds a minimal SDP from these fields. This keeps each QR code
 
 Online, QR pairing still uses the STUN/TURN servers, so it also works across networks.
 
+## Receiving, saving and history
+
+**Streaming to disk.** Incoming files are written to disk as the pieces arrive, so even very large files don't have to fit in memory (`lib/files.ts`):
+
+| Where | When | Notes |
+| --- | --- | --- |
+| A folder you choose | **Choose a folder** on the transfer screen (Chrome/Edge desktop) | Files are written straight into it, and existing files are never overwritten (`photo (2).jpg`). |
+| Browser storage on disk (OPFS) | Default where supported (Chrome, Edge, Firefox, Android, recent Safari) | Save them whenever you like. Kept for 7 days, then removed automatically. |
+| Memory | Fallback | Only when neither of the above is available. |
+
+The sender only marks a file *Delivered* once it has been fully written on the other side.
+
+**Saving.** Each received file has a **Save** button. You can also tick several files and use **Save selected**, or **Save all**:
+
+- on Chrome/Edge desktop, you pick a folder and the files are written into it;
+- elsewhere, they download as one ZIP. The ZIP is assembled from the files already on disk, with no copying, because checksums are calculated while the files arrive (`lib/zip.ts`, `lib/crc32.ts`);
+- if a ZIP would exceed 4 GB, they download one by one.
+
+**History** (top-right button). Every sent and received file is listed by day, with size, the other device's code and the time. Received files kept in browser storage can be saved again, one at a time or several at once. You can delete single entries or clear everything, which also deletes the stored files. The list lives in `localStorage`, on this device only.
+
 ## File transfer protocol
 
 The connection uses two **pre-negotiated data channels** (ids 0 and 1, ordered and reliable). The side that made the offer sends on channel 0 and receives on channel 1; the other side does the reverse. Each direction therefore has its own channel, and both people can send at once without their chunks mixing.
@@ -295,7 +315,7 @@ Without `NEXT_PUBLIC_SIGNAL_URL`, the app pairs through its own `/api/signal` by
 
 ## Known limitations
 
-- **Received files are held in memory** until saved, so multi-gigabyte files may be too much for a phone. Streaming straight to disk would fix this.
+- **Without on-disk browser storage** (some older browsers), received files fall back to memory, so very large files may be too much for those devices.
 - **Some networks block direct connections.** Configure a TURN relay (see [Deploying](#deploying)).
 - **Both tabs must stay open**, and ideally in the foreground on mobile, until transfers finish. Interrupted transfers don't resume.
 - **Rate limiting is per server instance** and in memory. On serverless platforms, put a shared limiter (for example Upstash Ratelimit or Vercel's firewall) in front for real protection.
@@ -312,6 +332,10 @@ Without `NEXT_PUBLIC_SIGNAL_URL`, the app pairs through its own `/api/signal` by
 | `components/icons.tsx` | Icon re-exports from Phosphor. |
 | `lib/pairing.ts` | Code generation, mailbox ids, PBKDF2 and AES-GCM, and the mailbox client. |
 | `lib/peer.ts` | `PeerLink`: the WebRTC connection, the two data channels, and the file send/receive protocol. Also `loadIceServers()`. |
+| `lib/files.ts` | Where received files are written (folder / OPFS / memory), and saving out (single file, folder, ZIP). |
+| `lib/history.ts` | Transfer history and the 7-day cleanup. |
+| `lib/zip.ts`, `lib/crc32.ts` | Zero-copy ZIP builder and incremental checksum. |
+| `components/transfer-panel.tsx`, `components/history-panel.tsx`, `components/file-row.tsx` | The transfer screen, the history screen, and the shared file row. |
 | `lib/qr-signal.ts` | Packs a WebRTC description into a short QR string, and back. |
 | `components/qr.tsx` | QR code display and camera scanner (native `BarcodeDetector` or jsQR). |
 | `app/api/ice/route.ts` | Returns STUN servers plus TURN relay credentials, when configured. |

@@ -81,6 +81,7 @@ button {
 /* Layout */
 
 .shell {
+  gap: 16px;
   min-height: 100dvh;
   display: flex;
   flex-direction: column;
@@ -89,9 +90,20 @@ button {
 }
 
 .top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   width: 100%;
-  max-width: 440px;
+  max-width: 600px;
   padding: 4px 4px 0;
+}
+
+.header-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  font-size: 13px;
 }
 
 .brand {
@@ -118,6 +130,11 @@ button {
   border: 1px solid var(--line);
   border-radius: var(--radius);
   box-shadow: var(--shadow);
+  transition: max-width 0.2s ease;
+}
+
+.card-wide {
+  max-width: 600px;
 }
 
 .foot {
@@ -482,6 +499,19 @@ button {
   box-shadow: 0 0 0 4px color-mix(in srgb, var(--ok) 18%, transparent);
 }
 
+.ghost-button,
+.primary-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+
+.primary-button:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
 .ghost-button {
   padding: 8px 14px;
   border: 1px solid var(--line);
@@ -575,7 +605,10 @@ button {
   flex-direction: column;
   align-items: center;
   gap: 10px;
+  width: 100%;
   padding: 36px 16px;
+  background: transparent;
+  font: inherit;
   border: 1.5px dashed var(--line);
   border-radius: 16px;
   color: var(--muted);
@@ -595,6 +628,18 @@ button {
   background: var(--accent-soft);
 }
 
+.drop-compact {
+  flex-direction: row;
+  justify-content: center;
+  gap: 10px;
+  padding: 12px 16px;
+}
+
+.drop-compact .drop-icon {
+  width: 28px;
+  height: 28px;
+}
+
 .drop-icon {
   display: grid;
   place-items: center;
@@ -606,27 +651,122 @@ button {
 }
 
 .relay-note {
-  margin-top: 12px;
+  margin: 0;
 }
 
-.transfers {
+/* Transfer / history panels */
+
+.panel {
+  position: relative;
   display: grid;
-  gap: 4px;
-  margin: 20px 0 0;
+  gap: 16px;
+}
+
+.panel .connected-head {
+  margin-bottom: 4px;
+}
+
+.destination {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: start;
+  column-gap: 8px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.destination strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.destination-icon {
+  margin-top: 2px;
+}
+
+.destination .link-button {
+  margin: 0;
+  white-space: nowrap;
+}
+
+.list-section {
+  display: grid;
+  gap: 6px;
+}
+
+.list-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.list-head .label {
+  font-weight: 600;
+}
+
+.list-actions {
+  display: flex;
+  gap: 16px;
+}
+
+.list-head .link-button,
+.list-actions .link-button {
+  margin: 0;
+  font-size: 13px;
+}
+
+.link-button.danger {
+  color: var(--danger);
+}
+
+.group-label {
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.rows {
+  display: grid;
+  margin: 0;
   padding: 0;
   list-style: none;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  overflow: hidden;
 }
 
-.transfer {
+.row {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 10px 4px;
+  padding: 12px 14px;
   border-top: 1px solid var(--line);
+  transition: background 0.15s;
 }
 
-.transfer:first-child {
+.row:first-child {
   border-top: 0;
+}
+
+.row-selected {
+  background: var(--accent-soft);
+}
+
+.check,
+.check-space {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  margin: 0;
+}
+
+.check {
+  accent-color: var(--accent);
+  cursor: pointer;
 }
 
 .badge {
@@ -645,20 +785,85 @@ button {
   color: var(--accent);
 }
 
-.transfer-body {
+.row-body {
   flex: 1;
   min-width: 0;
 }
 
-.transfer-name {
+.row-name {
   overflow: hidden;
   font-weight: 500;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.transfer-failed .transfer-name {
+.row-detail {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.row-failed .row-name {
   color: var(--muted);
+}
+
+.row-action {
+  flex: none;
+}
+
+.row-buttons {
+  display: flex;
+  gap: 4px;
+}
+
+.small-icon {
+  width: 34px;
+  height: 34px;
+  border-color: transparent;
+}
+
+.toolbar {
+  position: sticky;
+  bottom: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 10px 10px 16px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.toolbar-buttons {
+  display: flex;
+  gap: 8px;
+}
+
+.notice {
+  color: var(--ok);
+}
+
+.empty {
+  display: grid;
+  justify-items: center;
+  gap: 6px;
+  padding: 32px 0;
+  text-align: center;
+}
+
+.drop-overlay {
+  position: absolute;
+  inset: -12px;
+  display: grid;
+  place-items: center;
+  border: 2px dashed var(--accent);
+  border-radius: 18px;
+  background: color-mix(in srgb, var(--accent-soft) 88%, transparent);
+  color: var(--accent);
+  font-weight: 600;
+  pointer-events: none;
 }
 
 .bar {
@@ -677,6 +882,8 @@ button {
 }
 
 .save {
+  border: 0;
+  cursor: pointer;
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -703,9 +910,33 @@ button {
   color: var(--danger);
 }
 
+@media (max-width: 520px) {
+  /* Phones don't drag and drop. */
+  .drop-hint {
+    display: none;
+  }
+}
+
 @media (max-width: 420px) {
   .card {
-    padding: 24px 20px;
+    padding: 24px 16px;
+  }
+
+  .save {
+    padding: 8px 10px;
+  }
+
+  .save-label {
+    display: none;
+  }
+
+  .row {
+    gap: 10px;
+    padding: 10px 12px;
+  }
+
+  .toolbar {
+    border-radius: 16px;
   }
 
   .cell {
