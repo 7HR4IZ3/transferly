@@ -4,6 +4,9 @@
   "name": "transferly",
   "main": "src/index.ts",
   "compatibility_date": "2025-09-01",
+  // Don't wipe variables added in the Cloudflare dashboard on each deploy.
+  // (Put CLOUDFLARE_TURN_KEY_ID / CLOUDFLARE_TURN_API_TOKEN there as *Secrets*.)
+  "keep_vars": true,
   "durable_objects": {
     "bindings": [
       { "name": "MAILBOX", "class_name": "Mailbox" },
