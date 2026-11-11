@@ -215,21 +215,21 @@ Each file is sent as:
 ## Running locally
 
 ```bash
-npm install
-npm run dev            # http://localhost:3000
+bun install
+bun run dev            # http://localhost:3000
 ```
 
 Checks:
 
 ```bash
-npm run lint
-npm run typecheck
-npm run build && npm run start
+bun run lint
+bun run typecheck
+bun run build && bun run start
 ```
 
 To try it on one machine, open the app in two isolated sessions, for example a normal window plus a private window, or two different browsers.
 
-**Testing with a phone:** the encryption uses `crypto.subtle`, which browsers only allow on HTTPS or `localhost`. Opening `http://<your-LAN-IP>:3000` on a phone will **not** work. Use `npx next dev --experimental-https` and accept the self-signed certificate, or an HTTPS tunnel such as cloudflared or ngrok.
+**Testing with a phone:** the encryption uses `crypto.subtle`, which browsers only allow on HTTPS or `localhost`. Opening `http://<your-LAN-IP>:3000` on a phone will **not** work. Use `bunx next dev --experimental-https` and accept the self-signed certificate, or an HTTPS tunnel such as cloudflared or ngrok.
 
 ## Deploying
 
@@ -243,9 +243,9 @@ Everything here fits in free tiers:
 
 ```bash
 cd worker
-npm install
-npx wrangler login                                  # free Cloudflare account
-npx wrangler deploy                                 # prints https://transferly-signal.<you>.workers.dev
+bun install
+bunx wrangler login                                  # free Cloudflare account
+bunx wrangler deploy                                 # prints https://transferly-signal.<you>.workers.dev
 ```
 
 Then, in Vercel, set `NEXT_PUBLIC_SIGNAL_URL` to that URL and redeploy. It's read at build time.
@@ -258,8 +258,8 @@ In the Cloudflare dashboard, open **Realtime → TURN Server** and create a key.
 
 ```bash
 cd worker
-npx wrangler secret put CLOUDFLARE_TURN_KEY_ID      # paste the Turn Token ID
-npx wrangler secret put CLOUDFLARE_TURN_API_TOKEN   # paste the API token
+bunx wrangler secret put CLOUDFLARE_TURN_KEY_ID      # paste the Turn Token ID
+bunx wrangler secret put CLOUDFLARE_TURN_API_TOKEN   # paste the API token
 ```
 
 ### Relay guardrails (keeping it free)
