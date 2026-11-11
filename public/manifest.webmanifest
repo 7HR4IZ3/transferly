@@ -1,11 +1,11 @@
 {
   "name": "Transferly",
   "short_name": "Transferly",
-  "description": "Direct, local browser-to-browser file transfers.",
+  "description": "Send files directly between two browsers with a 6-digit code.",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#f7f7f3",
-  "theme_color": "#f7f7f3",
+  "background_color": "#f6f6f4",
+  "theme_color": "#f6f6f4",
   "orientation": "any",
   "icons": [
     {

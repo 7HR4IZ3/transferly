@@ -1,17 +1,10 @@
 export {
   ArrowDown,
-  ArrowLeft,
-  ArrowRight,
   ArrowUp,
-  Camera,
   Check,
   Copy,
   DownloadSimple as Download,
-  FileText as FileIcon,
-  Link as LinkIcon,
-  LockKey as Lock,
+  LockSimple as Lock,
   Plus,
-  ShieldCheck as Shield,
-  WifiHigh as Wifi,
   X as XIcon,
 } from "@phosphor-icons/react";
