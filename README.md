@@ -1,17 +1,20 @@
 # Transferly
 
-Send files directly between two browsers. Each device shows a 6-digit code; the two people tell each other their codes, type them in, and the browsers connect peer-to-peer. No accounts, no links, no copy-pasting long tokens.
+Send files directly between two browsers. One person reads out their 6-digit code, the other types it in, and the two browsers connect peer-to-peer automatically. No accounts, no links, no copy-pasting long tokens.
 
 ## How it works
 
-1. Each browser reserves a random 6-digit code on the server (`/api/signal`).
-2. Person A types B's code. A drops an encrypted "hello" in B's mailbox.
-3. Person B types A's code. B sees A's hello and sends an encrypted WebRTC offer to A; A answers.
-   (If both type at the same moment, the device with the lower code makes the offer.)
-4. The browsers open a direct WebRTC connection. Either side can drop files and they stream
-   straight to the other browser. Codes are freed as soon as the devices connect.
+1. Each browser reserves a random 6-digit code on the server (`/api/signal`) and shows it.
+2. Person B types A's code. B's browser sends an encrypted WebRTC offer to A's mailbox,
+   with B's own code inside it.
+3. A's browser picks up the offer, learns B's code from it, and sends its answer back to B.
+   Nobody on A's side has to do anything.
+4. The browsers open a direct WebRTC connection, and either side can drop files.
+   Both codes are freed as soon as the devices connect.
 
-Both people must type the other's code. A device only accepts a connection from the code its user entered, so guessing someone's code isn't enough to connect to them.
+If both people happen to type each other's code at once, the device with the lower code keeps its offer and the other one answers.
+
+Anyone who enters your code while it's showing will connect to you. Codes are single-use, expire after 10 minutes, and the API is rate-limited to make guessing impractical. The connected screen shows the other device's code so you can check it's who you expect.
 
 ### What the server sees
 

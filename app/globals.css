@@ -145,8 +145,21 @@ button {
 }
 
 .divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 24px 0;
+  color: var(--muted);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.divider::before,
+.divider::after {
+  content: "";
+  flex: 1;
   height: 1px;
-  margin: 28px 0;
   background: var(--line);
 }
 

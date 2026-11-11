@@ -5,7 +5,7 @@ import { ArrowDown, ArrowUp, Check, Copy, Download, Lock, Plus, XIcon } from "./
 import { Mailbox, PairingError, formatCode, isValidCode, randomToken, type SignalMessage } from "../lib/pairing";
 import { PeerLink, type LinkState, type Transfer } from "../lib/peer";
 
-type Phase = "loading" | "idle" | "waiting" | "connecting" | "connected" | "ended";
+type Phase = "loading" | "idle" | "connecting" | "connected" | "ended";
 
 const POLL_MS = 1200;
 const CONNECT_TIMEOUT_MS = 30_000;
@@ -28,7 +28,6 @@ export default function TransferlyApp() {
   const [input, setInput] = useState("");
   const [peerCode, setPeerCode] = useState("");
   const [error, setError] = useState("");
-  const [knocked, setKnocked] = useState(false);
   const [transfers, setTransfers] = useState<Transfer[]>([]);
   const [copied, setCopied] = useState(false);
   const [dragging, setDragging] = useState(false);
@@ -38,7 +37,6 @@ export default function TransferlyApp() {
   const phaseRef = useRef<Phase>("loading");
   const targetRef = useRef("");
   const sidRef = useRef("");
-  const knocksRef = useRef(new Set<string>());
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -65,8 +63,6 @@ export default function TransferlyApp() {
       linkRef.current = null;
       targetRef.current = "";
       sidRef.current = "";
-      knocksRef.current.clear();
-      setKnocked(false);
       setPeerCode("");
       setInput("");
       setError(message);
@@ -100,7 +96,10 @@ export default function TransferlyApp() {
 
   const newLink = useCallback(
     (initiator: boolean) => {
-      linkRef.current?.close();
+      // Detach before closing so the old link's "closed" event is ignored.
+      const previous = linkRef.current;
+      linkRef.current = null;
+      previous?.close();
       const link: PeerLink = new PeerLink(initiator, {
         onState: (state) => handleLinkState(link, state),
         onTransfer: upsertTransfer,
@@ -161,28 +160,23 @@ export default function TransferlyApp() {
       if (!me || phaseNow === "connected" || phaseNow === "ended") return;
       const fromTarget = message.from === targetRef.current;
 
-      if (message.kind === "hello") {
-        knocksRef.current.add(message.from);
-        if (fromTarget && phaseNow === "waiting") {
-          // Both typed each other's code at the same time: lower code makes the offer.
-          if (me < message.from) await sendOffer(message.from);
-        } else if (!targetRef.current) {
-          setKnocked(true);
-        }
-        return;
-      }
-
-      // Offers and answers are only accepted from the code this user typed in.
-      if (!fromTarget) return;
+      const link = linkRef.current;
 
       if (message.kind === "offer") {
-        const link = linkRef.current;
-        if (link?.initiator && me < message.from) return; // glare: keep our own offer
-        if (link && !link.initiator) return; // already answering
+        // Someone typed our code: connect to them automatically. The offer
+        // carries their code so our answer can go straight back to them.
+        if (link && !link.initiator) return; // already answering someone
+        if (link?.initiator) {
+          // We're dialing someone else, or we both typed each other's code at
+          // once. In the second case the lower code keeps its own offer.
+          if (!fromTarget || me < message.from) return;
+        }
+        targetRef.current = message.from;
+        setPeerCode(message.from);
+        setError("");
         await answerOffer(message);
       } else if (message.kind === "answer") {
-        const link = linkRef.current;
-        if (!link?.initiator || message.sid !== sidRef.current) return;
+        if (!fromTarget || !link?.initiator || message.sid !== sidRef.current) return;
         try {
           await link.acceptAnswer(message.sdp);
         } catch {
@@ -190,7 +184,7 @@ export default function TransferlyApp() {
         }
       }
     },
-    [answerOffer, backToIdle, sendOffer],
+    [answerOffer, backToIdle],
   );
 
   const adoptMailbox = useCallback(
@@ -241,7 +235,7 @@ export default function TransferlyApp() {
     };
   }, [adoptMailbox, claimFailed]);
 
-  // Poll our mailbox for knocks, offers and answers until we're connected.
+  // Poll our mailbox for offers and answers until we're connected.
   useEffect(() => {
     if (!myCode) return;
     let stopped = false;
@@ -288,20 +282,9 @@ export default function TransferlyApp() {
       setError("");
       targetRef.current = code;
       setPeerCode(code);
-
-      if (knocksRef.current.has(code)) {
-        await sendOffer(code);
-        return;
-      }
-
-      go("waiting");
-      try {
-        await Mailbox.send(code, { kind: "hello", from: me });
-      } catch (err) {
-        if (targetRef.current === code) backToIdle(err instanceof Error ? err.message : "Couldn't reach that code.");
-      }
+      await sendOffer(code);
     },
-    [backToIdle, go, sendOffer],
+    [sendOffer],
   );
 
   const handleInput = (event: ChangeEvent<HTMLInputElement>) => {
@@ -358,7 +341,7 @@ export default function TransferlyApp() {
         {!paired ? (
           <>
             <div className="block">
-              <p className="label">Your code</p>
+              <p className="label">Share your code</p>
               <div className="my-code">
                 <span className={"code" + (myCode ? "" : " code-loading")}>{myCode ? formatCode(myCode) : "··· ···"}</span>
                 {myCode ? (
@@ -369,11 +352,13 @@ export default function TransferlyApp() {
               </div>
             </div>
 
-            <div className="divider" />
+            <div className="divider">
+              <span>or</span>
+            </div>
 
             <div className="block">
               <label className="label" htmlFor="peer-code">
-                Their code
+                Enter a code
               </label>
               <div className={"otp" + (phase !== "idle" ? " otp-locked" : "")}>
                 <input
@@ -400,7 +385,7 @@ export default function TransferlyApp() {
                 </div>
               </div>
 
-              <Status phase={phase} peerCode={peerCode} error={error} knocked={knocked} onCancel={() => backToIdle()} />
+              <Status phase={phase} peerCode={peerCode} error={error} onCancel={() => backToIdle()} />
             </div>
           </>
         ) : (
@@ -476,35 +461,25 @@ function Status({
   phase,
   peerCode,
   error,
-  knocked,
   onCancel,
 }: {
   phase: Phase;
   peerCode: string;
   error: string;
-  knocked: boolean;
   onCancel: () => void;
 }) {
   if (error) return <p className="status status-error">{error}</p>;
-  if (phase === "waiting") {
+  if (phase === "connecting") {
     return (
       <p className="status">
-        <span className="spinner" /> Waiting for {formatCode(peerCode)} to enter your code
+        <span className="spinner" /> Connecting to {formatCode(peerCode)}…
         <button className="link-button" onClick={onCancel} type="button">
           Cancel
         </button>
       </p>
     );
   }
-  if (phase === "connecting") {
-    return (
-      <p className="status">
-        <span className="spinner" /> Connecting…
-      </p>
-    );
-  }
-  if (knocked) return <p className="status status-accent">Someone entered your code. Type theirs to connect.</p>;
-  return <p className="status muted">Share your code, then type the code from the other device.</p>;
+  return <p className="status muted">Only one of you needs to type a code. You&apos;ll connect automatically.</p>;
 }
 
 function TransferRow({ item }: { item: Transfer }) {
